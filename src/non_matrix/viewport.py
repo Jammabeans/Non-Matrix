@@ -6,7 +6,7 @@ from dataclasses import dataclass
 @dataclass
 class Viewport:
     width: int = 1200
-    height: int = 800
+    height: int = 960
     cell_size: float = 12.0
     min_cell_size: float = 2.0
     max_cell_size: float = 48.0

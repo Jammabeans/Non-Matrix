@@ -31,6 +31,27 @@ INFO_PANEL_WIDTH = 280
 ControlItem = tuple[str, str, str, float, float, float]
 
 CONTROL_PANEL_ITEMS: list[ControlItem] = [
+    ("Smell Decay", "smell_decay", "float", 0.01, 0.5, 0.999),
+    ("Smell Diffusion", "smell_diffusion", "float", 0.01, 0.0, 1.0),
+    ("Smell Food Source", "smell_food_source", "float", 0.25, 0.0, 30.0),
+    ("Smell Outpost Source", "smell_outpost_source", "float", 0.25, 0.0, 30.0),
+    ("Path Memory Decay", "path_memory_decay", "float", 0.01, 0.5, 0.999),
+    ("Path Memory Deposit", "path_memory_deposit", "float", 0.05, 0.0, 10.0),
+    ("Score Smell Weight", "score_smell_weight", "float", 0.05, 0.0, 5.0),
+    ("Score Alignment Weight", "score_alignment_weight", "float", 0.05, 0.0, 5.0),
+    ("Score Memory Penalty", "score_memory_penalty_weight", "float", 0.05, 0.0, 5.0),
+    ("Score Crowding Penalty", "score_crowding_penalty_weight", "float", 0.05, 0.0, 5.0),
+    ("Radius Step", "radius_step", "int", 5.0, 1.0, 500.0),
+    ("Coherence High Threshold", "coherence_high_threshold", "float", 1.0, 0.0, 100.0),
+    ("Coherence Low Threshold", "coherence_low_threshold", "float", 1.0, 0.0, 100.0),
+    ("Coherence Expand Ticks", "coherence_expand_ticks", "int", 1.0, 1.0, 500.0),
+    ("Coherence Contract Ticks", "coherence_contract_ticks", "int", 1.0, 1.0, 500.0),
+    ("Food Spawn Interval", "food_spawn_interval", "int", 5.0, 0.0, 5000.0),
+    ("Food Cluster Min", "food_cluster_min", "int", 1.0, 0.0, 20.0),
+    ("Food Cluster Max", "food_cluster_max", "int", 1.0, 0.0, 30.0),
+    ("Food Min Distance Ratio", "food_min_distance_ratio", "float", 0.05, 0.0, 1.0),
+    ("Food Energy Bonus", "food_energy_bonus", "int", 5.0, 0.0, 500.0),
+    ("Outpost Lock Radius", "outpost_lock_radius", "int", 1.0, 0.0, 20.0),
     ("Food Capture Radius", "food_capture_radius", "int", 1.0, 1.0, 12.0),
     ("Mycelium Target Neighbors", "mycelium_target_neighbors", "int", 1.0, 1.0, 8.0),
     ("Mycelium Zero Tax", "mycelium_zero_tax_enabled", "bool", 0.0, 0.0, 1.0),
@@ -54,6 +75,27 @@ CONTROL_PANEL_ITEMS: list[ControlItem] = [
 ]
 
 CONTROL_PANEL_HELP: dict[str, str] = {
+    "smell_decay": "Global decay per tick for smell traces. Higher values retain attractor trails longer.",
+    "smell_diffusion": "Fraction of smell that spreads to neighboring tiles each tick.",
+    "smell_food_source": "Smell source strength emitted by food clusters.",
+    "smell_outpost_source": "Smell source strength emitted by outpost anchors.",
+    "path_memory_decay": "Decay rate for path-memory traces. Lower values erase paths faster.",
+    "path_memory_deposit": "Path-memory amount deposited by each alive cell per tick.",
+    "score_smell_weight": "Weight of smell attraction in deterministic birth scoring.",
+    "score_alignment_weight": "Weight of directional alignment with parent growth vector.",
+    "score_memory_penalty_weight": "Penalty weight for re-entering recently traversed cells.",
+    "score_crowding_penalty_weight": "Penalty weight for births in already crowded neighborhoods.",
+    "radius_step": "How much the dynamic wall expands/contracts when coherence streak thresholds are met.",
+    "coherence_high_threshold": "Coherence % needed to grow the world radius.",
+    "coherence_low_threshold": "Coherence % below which the world radius contracts.",
+    "coherence_expand_ticks": "Consecutive high-coherence ticks required before radius expansion.",
+    "coherence_contract_ticks": "Consecutive low-coherence ticks required before radius contraction.",
+    "food_spawn_interval": "Tick interval between food spawn attempts. Set 0 to disable food spawning.",
+    "food_cluster_min": "Minimum number of food clusters spawned per spawn cycle.",
+    "food_cluster_max": "Maximum number of food clusters spawned per spawn cycle.",
+    "food_min_distance_ratio": "Minimum spawn distance from center as a ratio of current radius.",
+    "food_energy_bonus": "Energy gain awarded to the capturing root when food is consumed.",
+    "outpost_lock_radius": "Chebyshev radius of structural cells locked around a captured outpost.",
     "food_capture_radius": "Chebyshev distance used to capture food clusters. Higher values let roots claim food from farther away.",
     "mycelium_target_neighbors": "Neighbor count considered the ideal line state. Cells at this count get the vine optimization behavior.",
     "mycelium_zero_tax_enabled": "When enabled, ideal line cells pay zero base metabolic tax, preserving thin root chains.",
@@ -122,12 +164,14 @@ def _panel_layout(
     viewport: Viewport,
     panel_index: int,
     sidebar_width: int,
+    panel_scroll: int = 0,
 ) -> tuple[pygame.Rect, list[tuple[int, pygame.Rect, pygame.Rect, pygame.Rect]]]:
     panel_rect = pygame.Rect(0, 0, sidebar_width, viewport.height)
 
     line_h = 22
     max_rows = max(1, (panel_rect.height - 80) // line_h)
-    start = max(0, min(panel_index - (max_rows // 2), max(0, len(CONTROL_PANEL_ITEMS) - max_rows)))
+    max_start = max(0, len(CONTROL_PANEL_ITEMS) - max_rows)
+    start = max(0, min(panel_scroll, max_start))
     end = min(len(CONTROL_PANEL_ITEMS), start + max_rows)
 
     y = panel_rect.y + 44
@@ -229,6 +273,7 @@ def _draw(
     seed_history: list[tuple[str, tuple[int, int]]],
     snapshot_tick: int,
     panel_index: int,
+    panel_scroll: int,
     sidebar_width: int,
     render_stride: int = 1,
 ) -> None:
@@ -417,7 +462,7 @@ def _draw(
         screen.blit(overlay, (ox, oy))
         pygame.draw.rect(screen, PAUSED_BORDER_COLOR, pygame.Rect(2, 2, viewport.width - 4, viewport.height - 4), width=2)
 
-    panel_rect, rows = _panel_layout(viewport, panel_index, sidebar_width)
+    panel_rect, rows = _panel_layout(viewport, panel_index, sidebar_width, panel_scroll=panel_scroll)
     pygame.draw.rect(root_screen, PANEL_BG, panel_rect)
     pygame.draw.rect(root_screen, PANEL_BORDER, panel_rect, width=2)
 
@@ -446,20 +491,6 @@ def _draw(
 
     hint = panel_font.render("Enter submits seed when text exists.", True, PANEL_TEXT)
     root_screen.blit(hint, (panel_rect.x + 10, panel_rect.bottom - 28))
-
-    if hovered_attr is not None:
-        help_text = CONTROL_PANEL_HELP.get(hovered_attr, "No description available.")
-        tooltip_rect = pygame.Rect(panel_rect.x + 10, panel_rect.bottom - 140, panel_rect.width - 20, 106)
-        pygame.draw.rect(root_screen, (24, 30, 42), tooltip_rect)
-        pygame.draw.rect(root_screen, PANEL_ACTIVE, tooltip_rect, width=1)
-        help_title = panel_font.render("Setting details", True, PANEL_ACTIVE)
-        root_screen.blit(help_title, (tooltip_rect.x + 6, tooltip_rect.y + 4))
-        wrapped = _wrap_text(help_text, panel_font, tooltip_rect.width - 12)
-        ty = tooltip_rect.y + 24
-        for line in wrapped[:4]:
-            line_surf = panel_font.render(line, True, PANEL_TEXT)
-            root_screen.blit(line_surf, (tooltip_rect.x + 6, ty))
-            ty += 18
 
     pygame.draw.rect(root_screen, PANEL_BG, info_rect)
     pygame.draw.rect(root_screen, PANEL_BORDER, info_rect, width=2)
@@ -490,23 +521,60 @@ def _draw(
     root_screen.blit(legend_title, (info_rect.x + 10, iy + 8))
     iy += 34
 
-    legend_items: list[tuple[str, tuple[int, int, int]]] = [
-        ("Live Cell", CELL_COLOR),
-        ("Old Growth", OLD_GROWTH_COLOR),
-        ("Structural (Blue)", STRUCTURAL_BLUE),
-        ("Structural (White)", STRUCTURAL_WHITE),
-        ("Calcified/Overcrowded", CALCIFIED_COLOR),
-        ("Food", FOOD_COLOR),
-        ("Outpost", OUTPOST_COLOR),
-        ("Heat", HEAT_COLOR),
+    legend_items: list[tuple[str, str, tuple[int, int, int]]] = [
+        ("Live Cell", "swatch", CELL_COLOR),
+        ("Old Growth", "swatch", OLD_GROWTH_COLOR),
+        ("Structural (Blue)", "swatch", STRUCTURAL_BLUE),
+        ("Structural (White)", "swatch", STRUCTURAL_WHITE),
+        ("Structural Ghost", "swatch", (GHOST_BLUE[0], GHOST_BLUE[1], GHOST_BLUE[2])),
+        ("Calcified/Overcrowded", "swatch", CALCIFIED_COLOR),
+        ("Food", "swatch", FOOD_COLOR),
+        ("Outpost Anchor (star)", "star", OUTPOST_COLOR),
+        ("Lineage Link", "line", PARENT_LINE_COLOR),
+        ("Space Grid", "line", GRID_COLOR),
+        ("Heat", "swatch", HEAT_COLOR),
+        ("Mutation M0", "swatch", MUTATION_COLORS[0]),
+        ("Mutation M1", "swatch", MUTATION_COLORS[1]),
+        ("Mutation M2", "swatch", MUTATION_COLORS[2]),
+        ("Mutation M3", "swatch", MUTATION_COLORS[3]),
+        ("Mutation M4", "swatch", MUTATION_COLORS[4]),
+        ("Mutation M5", "swatch", MUTATION_COLORS[5]),
+        ("Mutation M6", "swatch", MUTATION_COLORS[6]),
+        ("Mutation M7", "swatch", MUTATION_COLORS[7]),
     ]
-    for label, color in legend_items:
+    for label, kind, color in legend_items:
         swatch = pygame.Rect(info_rect.x + 10, iy + 2, 12, 12)
-        pygame.draw.rect(root_screen, color, swatch)
-        pygame.draw.rect(root_screen, PANEL_BORDER, swatch, width=1)
+        if kind == "star":
+            pygame.draw.rect(root_screen, PANEL_BORDER, swatch, width=1)
+            _draw_star(root_screen, swatch.center, max(2, swatch.width // 2), color)
+        elif kind == "line":
+            pygame.draw.rect(root_screen, PANEL_BORDER, swatch, width=1)
+            pygame.draw.line(root_screen, color, (swatch.left + 1, swatch.centery), (swatch.right - 1, swatch.centery), 1)
+        else:
+            pygame.draw.rect(root_screen, color, swatch)
+            pygame.draw.rect(root_screen, PANEL_BORDER, swatch, width=1)
         lbl = panel_font.render(label, True, PANEL_TEXT)
         root_screen.blit(lbl, (info_rect.x + 30, iy))
         iy += 18
+
+    if hovered_attr is not None:
+        help_text = CONTROL_PANEL_HELP.get(hovered_attr, "No description available.")
+        setting_label = next((label for label, attr, *_ in CONTROL_PANEL_ITEMS if attr == hovered_attr), hovered_attr)
+        help_rect = pygame.Rect(info_rect.x + 10, info_rect.bottom - 150, info_rect.width - 20, 138)
+        pygame.draw.rect(root_screen, (24, 30, 42), help_rect)
+        pygame.draw.rect(root_screen, PANEL_ACTIVE, help_rect, width=1)
+
+        help_title = panel_font.render("Hovered setting", True, PANEL_ACTIVE)
+        root_screen.blit(help_title, (help_rect.x + 6, help_rect.y + 4))
+        setting_surface = panel_font.render(setting_label, True, PANEL_TEXT)
+        root_screen.blit(setting_surface, (help_rect.x + 6, help_rect.y + 22))
+
+        wrapped = _wrap_text(help_text, panel_font, help_rect.width - 12)
+        ty = help_rect.y + 42
+        for line in wrapped[:5]:
+            line_surf = panel_font.render(line, True, PANEL_TEXT)
+            root_screen.blit(line_surf, (help_rect.x + 6, ty))
+            ty += 18
 
 
 def main() -> None:
@@ -529,6 +597,7 @@ def main() -> None:
     input_text = ""
     accumulator = 0.0
     panel_index = 0
+    panel_scroll = 0
 
     while running:
         dt = clock.tick(60) / 1000.0
@@ -550,7 +619,7 @@ def main() -> None:
                 running = False
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1:
-                    panel_rect, rows = _panel_layout(viewport, panel_index, SIDEBAR_WIDTH)
+                    panel_rect, rows = _panel_layout(viewport, panel_index, SIDEBAR_WIDTH, panel_scroll=panel_scroll)
                     if panel_rect.collidepoint(event.pos):
                         handled = False
                         for idx, row_rect, minus_rect, plus_rect in rows:
@@ -569,6 +638,12 @@ def main() -> None:
                                 handled = True
                                 break
                         if handled:
+                            line_h = 22
+                            max_rows = max(1, (viewport.height - 80) // line_h)
+                            if panel_index < panel_scroll:
+                                panel_scroll = panel_index
+                            elif panel_index >= panel_scroll + max_rows:
+                                panel_scroll = panel_index - max_rows + 1
                             continue
 
                     if event.pos[0] < SIDEBAR_WIDTH or event.pos[0] >= (SIDEBAR_WIDTH + viewport.width):
@@ -577,9 +652,18 @@ def main() -> None:
                     dragging = True
                     last_mouse = event.pos
                 elif event.button == 4:
+                    if event.pos[0] < SIDEBAR_WIDTH:
+                        panel_scroll = max(0, panel_scroll - 2)
+                        continue
                     if SIDEBAR_WIDTH <= event.pos[0] < (SIDEBAR_WIDTH + viewport.width):
                         viewport.zoom_at(1.1, event.pos[0] - SIDEBAR_WIDTH, event.pos[1])
                 elif event.button == 5:
+                    if event.pos[0] < SIDEBAR_WIDTH:
+                        line_h = 22
+                        max_rows = max(1, (viewport.height - 80) // line_h)
+                        max_start = max(0, len(CONTROL_PANEL_ITEMS) - max_rows)
+                        panel_scroll = min(max_start, panel_scroll + 2)
+                        continue
                     if SIDEBAR_WIDTH <= event.pos[0] < (SIDEBAR_WIDTH + viewport.width):
                         viewport.zoom_at(1 / 1.1, event.pos[0] - SIDEBAR_WIDTH, event.pos[1])
             elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
@@ -613,6 +697,13 @@ def main() -> None:
                         _adjust_control_value(sim, CONTROL_PANEL_ITEMS[panel_index], direction=1)
                     elif event.key == pygame.K_RETURN:
                         _adjust_control_value(sim, CONTROL_PANEL_ITEMS[panel_index], direction=1)
+
+                    line_h = 22
+                    max_rows = max(1, (viewport.height - 80) // line_h)
+                    if panel_index < panel_scroll:
+                        panel_scroll = panel_index
+                    elif panel_index >= panel_scroll + max_rows:
+                        panel_scroll = panel_index - max_rows + 1
                 elif event.key == pygame.K_BACKSPACE:
                     input_text = input_text[:-1]
                 elif event.key == pygame.K_F1:
@@ -643,6 +734,7 @@ def main() -> None:
             seed_history=seed_history,
             snapshot_tick=sim.snapshot_tick,
             panel_index=panel_index,
+            panel_scroll=panel_scroll,
             sidebar_width=SIDEBAR_WIDTH,
             render_stride=render_stride,
         )

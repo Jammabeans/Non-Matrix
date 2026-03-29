@@ -7,7 +7,7 @@ from collections.abc import Iterator
 
 from .cell import Coord, MAX_ENERGY
 
-MAX_CELLS = 10_000
+MAX_CELLS = 25_000
 MAX_RADIUS = 500
 
 MOORE_OFFSETS: tuple[Coord, ...] = (
@@ -39,6 +39,7 @@ class SparseGrid:
         self,
         mutation_chance: float = 0.05,
         rng: random.Random | None = None,
+        rng_seed: int = 0,
         max_active_cells: int = 20_000,
         min_radius: int = 300,
         max_radius: int = 1200,
@@ -52,7 +53,8 @@ class SparseGrid:
         self.pending_death: set[Coord] = set()
         self.tick: int = 0
         self.mutation_chance = mutation_chance
-        self.rng = rng if rng is not None else random.Random(0)
+        self.rng_seed = int(rng_seed)
+        self.rng = rng if rng is not None else random.Random(self.rng_seed)
         self.max_active_cells = max_active_cells
         self.seed_anchors: set[Coord] = set()
         self.anchor_radius: int = 5
@@ -83,6 +85,7 @@ class SparseGrid:
         self.overcrowded_structural_cells: set[Coord] = set()
         self.structural_overcrowded_ticks: dict[Coord, int] = {}
         self.food_capture_radius: int = 3
+        self.outpost_lock_radius: int = 2
         self.mycelium_target_neighbors: int = 2
         self.mycelium_zero_tax_enabled: bool = True
         self.vine_off_target_multiplier: int = 2
@@ -102,6 +105,20 @@ class SparseGrid:
         self.vector_bias_maturity_ticks: int = 5
         self.vector_cone_degrees: float = 45.0
         self.lateral_inhibition_enabled: bool = True
+
+        # Deterministic exploration fields.
+        self.smell_field: dict[Coord, float] = {}
+        self.path_memory: dict[Coord, float] = {}
+        self.smell_decay: float = 0.93
+        self.smell_diffusion: float = 0.22
+        self.smell_food_source: float = 8.0
+        self.smell_outpost_source: float = 3.0
+        self.path_memory_decay: float = 0.9
+        self.path_memory_deposit: float = 1.0
+        self.score_smell_weight: float = 1.0
+        self.score_alignment_weight: float = 0.4
+        self.score_memory_penalty_weight: float = 0.7
+        self.score_crowding_penalty_weight: float = 0.2
 
     def get(self, coord: Coord) -> Meta | None:
         return self.meta.get(coord)
@@ -274,6 +291,46 @@ class SparseGrid:
         self.outpost_anchors.clear()
         self.overcrowded_structural_cells.clear()
         self.structural_overcrowded_ticks.clear()
+        self.smell_field.clear()
+        self.path_memory.clear()
+        self.rng = random.Random(self.rng_seed)
+
+    def update_exploration_fields(self) -> None:
+        """Update deterministic smell and path-memory fields each tick."""
+        if self.smell_field:
+            new_smell: dict[Coord, float] = {}
+            for coord, value in self.smell_field.items():
+                decayed = value * self.smell_decay
+                if decayed < 0.01:
+                    continue
+                new_smell[coord] = max(new_smell.get(coord, 0.0), decayed)
+                spread = decayed * self.smell_diffusion
+                if spread < 0.01:
+                    continue
+                cx, cy = coord
+                for dx, dy in MOORE_OFFSETS:
+                    nc = (cx + dx, cy + dy)
+                    if not self.is_within_bounds(nc):
+                        continue
+                    if spread > new_smell.get(nc, 0.0):
+                        new_smell[nc] = spread
+            self.smell_field = new_smell
+
+        for coord in self.food_clusters:
+            self.smell_field[coord] = max(self.smell_field.get(coord, 0.0), self.smell_food_source)
+        for coord in self.outpost_anchors:
+            self.smell_field[coord] = max(self.smell_field.get(coord, 0.0), self.smell_outpost_source)
+
+        if self.path_memory:
+            for coord in tuple(self.path_memory.keys()):
+                decayed = self.path_memory[coord] * self.path_memory_decay
+                if decayed < 0.01:
+                    self.path_memory.pop(coord, None)
+                else:
+                    self.path_memory[coord] = decayed
+
+        for coord in self.alive_coords:
+            self.path_memory[coord] = self.path_memory.get(coord, 0.0) + self.path_memory_deposit
 
     def mark_for_death(self, coord: Coord) -> None:
         if coord in self.cells:
@@ -302,8 +359,20 @@ class SparseGrid:
     def register_outpost_anchor(self, origin: Coord) -> None:
         self.outpost_anchors.add(origin)
         self.seed_anchors.add(origin)
-        self.structural_cells.add(origin)
-        self.structural_mutation.setdefault(origin, self.mutation_type(origin))
+        self._lock_outpost_area(origin, radius=self.outpost_lock_radius)
+
+    def _lock_outpost_area(self, origin: Coord, radius: int = 2) -> None:
+        ox, oy = origin
+        base_mutation = self.mutation_type(origin)
+        for dx in range(-radius, radius + 1):
+            for dy in range(-radius, radius + 1):
+                if max(abs(dx), abs(dy)) > radius:
+                    continue
+                coord = (ox + dx, oy + dy)
+                if not self.is_within_bounds(coord):
+                    continue
+                self.structural_cells.add(coord)
+                self.structural_mutation.setdefault(coord, base_mutation)
 
     def remove_structural(self, coord: Coord) -> None:
         self.structural_cells.discard(coord)
@@ -322,8 +391,10 @@ class SparseGrid:
         return True
 
     def award_food_energy(self, coord: Coord) -> None:
+        self.structural_cells.add(coord)
+        self.structural_mutation.setdefault(coord, self.mutation_type(coord))
         boosted = min(self.max_energy(coord), self.energy(coord) + self.food_energy_bonus)
-        self.set_energy(coord, boosted)
+        self.set_energy(coord, max(boosted, self.max_energy(coord)))
 
     def set_coherence_percent(self, coherence: float) -> None:
         value = max(0.0, min(100.0, float(coherence)))

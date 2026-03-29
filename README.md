@@ -1,46 +1,102 @@
 # Non-Matrix
 
-Sparse-grid cellular engine prototype for emergent computation experiments.
+Sparse-grid cellular intelligence sandbox for emergent computation, information foraging, and deterministic exploration experiments.
 
-## Runtime UI panels
+## What Non-Matrix is (current state)
 
-The application now uses a three-panel layout:
+Non-Matrix is a coordinate-only cellular simulation where growth happens in an unbounded sparse world (bounded by an adaptive radius), not a fixed 2D matrix.
 
-- **Left panel (Settings):** live-tunable simulation parameters with clickable `+/-` controls.
-- **Center panel (Render):** the world simulation view (not obscured by UI overlays).
-- **Right panel (Info):** live metrics and a color legend.
+The engine supports:
 
-### Settings interaction
+- mutation-local rule behavior
+- inherited lineage and growth vectors
+- food/outpost information foraging
+- structural memory and ghost reactivation
+- deterministic smell/path-memory exploration (replayable after clear/reseed)
+- live runtime tuning through an in-app settings panel
 
-- **Mouse:** click a setting row to select, click `+` / `-` to adjust.
-- **Keyboard:** `Up/Down` selects a setting; `Left/Right` adjusts; `Enter` toggles booleans.
-- **Hover help:** hovering a setting shows a detailed explanation tooltip in the left panel.
+This is an active prototype focused on emergent behavior and rapid experimentation.
 
-### Runtime controls
+## Current feature set
+
+### 1) Core simulation
+
+- Coordinate-only alive storage and frontier stepping
+- Rule-based local birth/survival with mutation types
+- Energy/tax pressure, crowding pressure, and heat dumping
+- Structural promotion and old-growth visualization
+
+### 2) Information-driven growth
+
+- **Adaptive wall radius** (coherence-driven expand/contract)
+- **Noise-filtered coherence** (active-pixel shape quality)
+- **Food clusters** spawning far from center
+- **Outpost anchors** when food is captured
+- **Outpost lock area** to stabilize captured regions
+
+### 3) Deterministic exploration model
+
+Movement decisions now use deterministic scoring instead of random movement gates.
+
+Scoring factors include:
+
+- smell attraction
+- growth-vector alignment
+- path-memory revisit penalty
+- crowding penalty
+
+This enables more reproducible path formation and directional searching.
+
+### 4) Visual + UI system
+
+- Three-panel runtime UI:
+  - **Left:** Settings (live controls)
+  - **Center:** World render
+  - **Right:** Simulation info + legend + hovered-setting help
+- Faint world-space background grid for spatial orientation
+- Structural pulse/ghost rendering and heat overlay
+- Expanded legend including line links, ghosts, mutation swatches, and outpost-star semantics
+
+## Runtime UI usage
+
+### Settings panel interactions
+
+- Click row to select a setting
+- Click `+` / `-` to adjust
+- Arrow keys navigate and edit selected setting
+- Mouse wheel over the left panel scrolls long setting lists
+- Hovering a setting shows details in the right info panel (non-blocking)
+
+### Global runtime controls
 
 - `F1` Toggle Play/Pause
 - `F2` Manual Step
 - `F3` Reset/Nuke
-- Arrow keys pan the viewport
-- Mouse wheel zooms
-- Click in render area seeds a root
-- Type text and press `Enter` to seed UTF-8 text pattern
+- Arrow keys pan the world viewport
+- Mouse wheel over world zooms
+- Click in render area seeds a single root
+- Type text and press `Enter` to seed UTF-8 bit-pattern text
 
-## Adaptive growth mechanics
+## Tuning categories available in-app
 
-The simulation now includes information-driven expansion and long-range exploration:
+- Smell field dynamics
+- Path-memory dynamics
+- Deterministic score weights
+- Coherence/radius adaptation
+- Food/outpost ecology
+- Structural/crowding/vector-bias controls
 
-- **Variable spatial wall**: active radius is dynamic in the range **300..1200** and adapts to coherence quality.
-- **Noise-filtered coherence**: coherence is computed from currently active pixels (not persistent structural ghost pixels).
-- **Food clusters**: 3-6 food targets spawn every 150 ticks at >=65% of current radius distance from the center.
-- **Outpost creation**: roots that reach food consume it, gain energy, and establish durable outpost anchors.
-- **Spatial grid background**: renderer now draws a faint world-space grid to improve orientation while panning and zooming.
+## Default adaptive policy (current)
 
-### Radius adaptation policy
+- Radius range: `300..1200`
+- Expand by `+50` when coherence >= `70%` for `10` consecutive checks
+- Contract by `-50` when coherence <= `35%` for `20` consecutive checks
+- Food spawn default: every `150` ticks, `3..6` clusters, min distance ratio `0.65`
 
-- Expand by 50 when coherence >=70% for 10 consecutive coherence updates.
-- Contract by 50 when coherence <=35% for 20 consecutive coherence updates.
-- Radius is always clamped to [300, 1200].
+## Validation status
+
+- Test suite currently passing: `42` tests
+- Includes deterministic replay and deterministic smell/path-memory behavior checks
 
 ## Quick start (uv)
 

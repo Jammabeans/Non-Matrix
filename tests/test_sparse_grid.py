@@ -132,3 +132,16 @@ def test_food_clusters_spawn_far_from_center() -> None:
     for x, y in grid.food_clusters:
         assert (x * x + y * y) ** 0.5 >= (min_dist - 2.0)
 
+
+def test_register_outpost_anchor_locks_local_structural_area() -> None:
+    grid = SparseGrid(min_radius=300, max_radius=1200)
+    center = (50, 50)
+    grid.register_outpost_anchor(center)
+
+    assert center in grid.outpost_anchors
+    for dx in range(-grid.outpost_lock_radius, grid.outpost_lock_radius + 1):
+        for dy in range(-grid.outpost_lock_radius, grid.outpost_lock_radius + 1):
+            if max(abs(dx), abs(dy)) > grid.outpost_lock_radius:
+                continue
+            assert (center[0] + dx, center[1] + dy) in grid.structural_cells
+

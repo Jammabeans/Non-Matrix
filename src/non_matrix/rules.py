@@ -9,6 +9,7 @@ from .sparse_grid import MAX_CELLS, MOORE_OFFSETS, SparseGrid
 
 
 RuleFn = Callable[[int, int], int]
+BIRTH_SCORE_THRESHOLD = -0.25
 
 
 def _rule_and_life(current_alive: int, neighbors: int) -> int:
@@ -93,6 +94,89 @@ def _select_parent_for_birth(grid: SparseGrid, alive_neighbors: list[Coord], rul
     return alive_neighbors[0] if alive_neighbors else None
 
 
+def _deterministic_birth_score(
+    grid: SparseGrid,
+    coord: Coord,
+    step_vec: Coord,
+    parent_vec: Coord,
+    neighbors: int,
+) -> float:
+    smell = grid.smell_field.get(coord, 0.0)
+    memory_penalty = grid.path_memory.get(coord, 0.0)
+
+    alignment = 0.0
+    if parent_vec != (0, 0):
+        sx, sy = step_vec
+        px, py = parent_vec
+        dot = (sx * px) + (sy * py)
+        alignment = dot / 2.0
+
+    crowding_penalty = float(max(0, neighbors - grid.mycelium_target_neighbors))
+    return (
+        (grid.score_smell_weight * smell)
+        + (grid.score_alignment_weight * alignment)
+        - (grid.score_memory_penalty_weight * memory_penalty)
+        - (grid.score_crowding_penalty_weight * crowding_penalty)
+    )
+
+
+def _select_parent_for_birth_deterministic(
+    grid: SparseGrid,
+    coord: Coord,
+    alive_neighbors: list[Coord],
+    rule_type: int,
+    neighbors: int,
+) -> tuple[Coord | None, Coord, float]:
+    if not alive_neighbors:
+        return None, (0, 0), float("-inf")
+
+    preferred = [nc for nc in alive_neighbors if grid.mutation_type(nc) == rule_type]
+    candidates = preferred if preferred else alive_neighbors
+
+    best: tuple[float, Coord, Coord] | None = None
+    for parent in candidates:
+        px, py = parent
+        dx = 0 if coord[0] == px else (1 if coord[0] > px else -1)
+        dy = 0 if coord[1] == py else (1 if coord[1] > py else -1)
+        step_vec = (dx, dy)
+        parent_vec = grid.growth_vector(parent)
+
+        if parent_vec != (0, 0) and not _within_cone(step_vec, parent_vec, grid.vector_cone_degrees):
+            continue
+
+        parent_structural_neighbors = 0
+        if grid.lateral_inhibition_enabled and grid.is_structural(parent):
+            parent_structural_neighbors = sum(
+                1 for nc in _alive_neighbor_coords(grid, parent) if grid.is_structural(nc)
+            )
+        if parent_vec != (0, 0) and parent_structural_neighbors == grid.mycelium_target_neighbors:
+            opposite = (-parent_vec[0], -parent_vec[1])
+            if step_vec not in (parent_vec, opposite):
+                continue
+
+        has_momentum = (
+            grid.vector_bias_enabled
+            and parent_vec != (0, 0)
+            and grid.survival_ticks.get(parent, 0) >= grid.vector_bias_maturity_ticks
+        )
+        growth_vec = parent_vec if has_momentum else step_vec
+        score = _deterministic_birth_score(
+            grid=grid,
+            coord=coord,
+            step_vec=step_vec,
+            parent_vec=parent_vec,
+            neighbors=neighbors,
+        )
+
+        key = (score, -parent[0], -parent[1])
+        if best is None or key > (best[0], -best[1][0], -best[1][1]):
+            best = (score, parent, growth_vec)
+
+    if best is None:
+        return None, (0, 0), float("-inf")
+    return best[1], best[2], best[0]
+
+
 def _neighbor_counter(grid: SparseGrid, frontier: set[Coord]) -> dict[Coord, int]:
     counts: dict[Coord, int] = {}
     for coord in frontier:
@@ -125,6 +209,7 @@ def _within_cone(step_vec: Coord, forward_vec: Coord, cone_degrees: float) -> bo
 
 def step_life(grid: SparseGrid) -> None:
     """Advance one tick using local mutation-rule physics."""
+    grid.update_exploration_fields()
     prior_active = max(1, len(grid.active_cells))
     candidates = grid.candidate_frontier()
     neighbor_counts = _neighbor_counter(grid, candidates)
@@ -151,16 +236,31 @@ def step_life(grid: SparseGrid) -> None:
         else:
             survives = rule_fn(alive, neighbors)
 
-        # Ghost-node bonus: structural dead coords are easier to reactivate.
+        # Ghost-node deterministic bonus: reactivate structural dead coords when local score is favorable.
         if alive == 0 and coord in grid.structural_cells and neighbors > 0 and survives == 0:
-            if grid.rng.random() < 0.5:
+            score = _deterministic_birth_score(
+                grid=grid,
+                coord=coord,
+                step_vec=(0, 0),
+                parent_vec=grid.growth_vector(coord),
+                neighbors=neighbors,
+            )
+            if score >= 0.0:
                 survives = 1
 
         if survives == 1:
             if alive == 0 and not births_allowed:
                 continue
             if alive == 0:
-                parent = _select_parent_for_birth(grid, alive_neighbors, rule_type)
+                parent, growth_vec, score = _select_parent_for_birth_deterministic(
+                    grid=grid,
+                    coord=coord,
+                    alive_neighbors=alive_neighbors,
+                    rule_type=rule_type,
+                    neighbors=neighbors,
+                )
+                if score < BIRTH_SCORE_THRESHOLD and coord not in grid.food_clusters:
+                    continue
                 if parent is not None:
                     px, py = parent
                     dx = 0 if coord[0] == px else (1 if coord[0] > px else -1)
@@ -185,17 +285,7 @@ def step_life(grid: SparseGrid) -> None:
                         and parent_vec != (0, 0)
                         and grid.survival_ticks.get(parent, 0) >= grid.vector_bias_maturity_ticks
                     )
-                    if has_momentum:
-                        directional_chance = (
-                            grid.vector_bias_forward_chance
-                            if step_vec == parent_vec
-                            else grid.vector_bias_side_chance
-                        )
-                        if grid.rng.random() > directional_chance:
-                            continue
-                        growth_vec = parent_vec
-                    else:
-                        growth_vec = step_vec
+                    growth_vec = parent_vec if has_momentum else step_vec
                 else:
                     growth_vec = (0, 0)
 

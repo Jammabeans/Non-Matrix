@@ -273,3 +273,40 @@ def test_directional_momentum_birth_bias_prefers_growth_vector() -> None:
 
     assert forward_births >= side_births
 
+
+def test_clear_and_reseed_replays_deterministically() -> None:
+    grid = SparseGrid(mutation_chance=0.0)
+
+    seed = {(0, -1), (0, 0), (0, 1)}
+    for coord in seed:
+        grid.activate(coord)
+    for _ in range(12):
+        step_life(grid)
+    first = set(grid.alive_coords)
+
+    grid.clear()
+    for coord in seed:
+        grid.activate(coord)
+    for _ in range(12):
+        step_life(grid)
+    second = set(grid.alive_coords)
+
+    assert first == second
+
+
+def test_smell_and_path_memory_bias_birth_direction_deterministically() -> None:
+    grid = SparseGrid(mutation_chance=0.0)
+    for coord in {(0, -1), (0, 0), (0, 1)}:
+        grid.activate(coord)
+        grid.set_mutation_type(coord, 3)
+
+    # Competing birth candidates at (-1,0) and (1,0):
+    # prefer east via smell and suppress west via path-memory penalty.
+    grid.smell_field[(1, 0)] = 4.0
+    grid.path_memory[(-1, 0)] = 5.0
+
+    step_life(grid)
+
+    assert (1, 0) in grid.alive_coords
+    assert (-1, 0) not in grid.alive_coords
+
