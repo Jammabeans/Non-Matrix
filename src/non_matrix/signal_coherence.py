@@ -17,6 +17,14 @@ def coherence_percent(
     seed_text: str,
     seed_history: list[tuple[str, tuple[int, int]]],
 ) -> float:
+    return coherence_percent_active(structural_coords, seed_text, seed_history)
+
+
+def coherence_percent_active(
+    active_coords: set[tuple[int, int]],
+    seed_text: str,
+    seed_history: list[tuple[str, tuple[int, int]]],
+) -> float:
     if not seed_text:
         return 0.0
     template_local = _seed_template_coords(seed_text)
@@ -24,7 +32,7 @@ def coherence_percent(
         return 0.0
     origin = seed_history[-1][1] if seed_history else (0, 0)
     template_global = {(x + origin[0], y + origin[1]) for x, y in template_local}
-    overlap = len(structural_coords & template_global)
+    overlap = len(active_coords & template_global)
     return min(100.0, (overlap / max(1, len(template_global))) * 100.0)
 
 

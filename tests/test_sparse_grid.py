@@ -85,3 +85,50 @@ def test_structural_cell_promoted_after_cumulative_occupancy() -> None:
     assert grid.is_structural(coord) is True
     assert grid.max_energy(coord) > 15
 
+
+def test_growth_vector_inherits_from_parent_or_step_direction() -> None:
+    grid = SparseGrid(mutation_chance=0.0)
+    parent = grid.activate((0, 0))
+    grid.set_growth_vector(parent, (1, 0))
+
+    child = grid.activate((1, 0), parent=parent)
+    assert grid.growth_vector(child) == (1, 0)
+
+    root = grid.activate((10, 10))
+    child2 = grid.activate((11, 11), parent=root)
+    assert grid.growth_vector(child2) == (1, 1)
+
+
+def test_dynamic_radius_bounds_check_uses_current_radius() -> None:
+    grid = SparseGrid(min_radius=300, max_radius=1200)
+    grid.current_radius = 300
+    assert grid.is_within_bounds((300, 0)) is True
+    assert grid.is_within_bounds((301, 0)) is False
+
+
+def test_radius_expands_and_contracts_from_coherence_streaks() -> None:
+    grid = SparseGrid(min_radius=300, max_radius=1200)
+    grid.current_radius = 500
+
+    for _ in range(10):
+        grid.set_coherence_percent(75.0)
+        grid.adapt_radius_from_coherence()
+    assert grid.current_radius == 550
+
+    for _ in range(20):
+        grid.set_coherence_percent(30.0)
+        grid.adapt_radius_from_coherence()
+    assert grid.current_radius == 500
+
+
+def test_food_clusters_spawn_far_from_center() -> None:
+    grid = SparseGrid(min_radius=300, max_radius=1200)
+    grid.current_radius = 600
+    grid.tick = 150
+
+    grid.maybe_spawn_food_clusters()
+    assert 3 <= len(grid.food_clusters) <= 6
+    min_dist = grid.current_radius * grid.food_min_distance_ratio
+    for x, y in grid.food_clusters:
+        assert (x * x + y * y) ** 0.5 >= (min_dist - 2.0)
+

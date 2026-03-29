@@ -114,6 +114,23 @@ class Simulation:
         with self._lock:
             return set(self.grid.structural_cells)
 
+    def food_coords_snapshot(self) -> set[tuple[int, int]]:
+        with self._lock:
+            return set(self.grid.food_clusters)
+
+    def outpost_coords_snapshot(self) -> set[tuple[int, int]]:
+        with self._lock:
+            return set(self.grid.outpost_anchors)
+
+    def current_radius(self) -> int:
+        with self._lock:
+            return self.grid.current_radius
+
+    def set_coherence_percent(self, coherence: float) -> None:
+        with self._lock:
+            self.grid.set_coherence_percent(coherence)
+            self.grid.adapt_radius_from_coherence()
+
     def seed_history_snapshot(self) -> list[tuple[str, tuple[int, int]]]:
         with self._lock:
             return list(self._seed_history)

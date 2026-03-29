@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import random
 from dataclasses import dataclass
 from collections.abc import Iterator
@@ -26,6 +27,7 @@ class Meta:
     mutation_type: int = 0
     energy: int = MAX_ENERGY
     parent: Coord | None = None
+    growth_vector: Coord = (0, 0)
     last_touched_tick: int = 0
     isolated_ticks: int = 0
 
@@ -38,6 +40,8 @@ class SparseGrid:
         mutation_chance: float = 0.05,
         rng: random.Random | None = None,
         max_active_cells: int = 20_000,
+        min_radius: int = 300,
+        max_radius: int = 1200,
     ) -> None:
         self.cells: set[Coord] = set()
         self.alive_coords: set[Coord] = self.cells
@@ -58,6 +62,46 @@ class SparseGrid:
         self.structural_cells: set[Coord] = set()
         self.structural_mutation: dict[Coord, int] = {}
         self.coherence_match: bool = False
+        self.min_radius: int = max(1, int(min_radius))
+        self.max_radius: int = max(self.min_radius, int(max_radius))
+        self.current_radius: int = max(min(MAX_RADIUS, self.max_radius), self.min_radius)
+        self.radius_step: int = 50
+        self.coherence_high_threshold: float = 70.0
+        self.coherence_low_threshold: float = 35.0
+        self.coherence_expand_ticks: int = 10
+        self.coherence_contract_ticks: int = 20
+        self.coherence_high_streak: int = 0
+        self.coherence_low_streak: int = 0
+        self.last_coherence_percent: float = 0.0
+        self.food_spawn_interval: int = 150
+        self.food_cluster_min: int = 3
+        self.food_cluster_max: int = 6
+        self.food_min_distance_ratio: float = 0.65
+        self.food_energy_bonus: int = MAX_ENERGY * 4
+        self.food_clusters: set[Coord] = set()
+        self.outpost_anchors: set[Coord] = set()
+        self.overcrowded_structural_cells: set[Coord] = set()
+        self.structural_overcrowded_ticks: dict[Coord, int] = {}
+        self.food_capture_radius: int = 3
+        self.mycelium_target_neighbors: int = 2
+        self.mycelium_zero_tax_enabled: bool = True
+        self.vine_off_target_multiplier: int = 2
+        self.crowding_threshold: int = 3
+        self.crowding_multiplier: int = 4
+        self.structural_discount_factor: float = 0.2
+        self.structural_overcrowded_neighbors: int = 2
+        self.structural_hibernate_overcrowd_neighbors: int = 4
+        self.structural_hibernate_ticks: int = 5
+        self.chemotaxis_outer_ratio: float = 0.7
+        self.chemotaxis_discount_factor: float = 0.5
+        self.outpost_magnet_radius: int = 200
+        self.outpost_magnet_discount_factor: float = 0.25
+        self.vector_bias_enabled: bool = True
+        self.vector_bias_forward_chance: float = 0.75
+        self.vector_bias_side_chance: float = 0.25
+        self.vector_bias_maturity_ticks: int = 5
+        self.vector_cone_degrees: float = 45.0
+        self.lateral_inhibition_enabled: bool = True
 
     def get(self, coord: Coord) -> Meta | None:
         return self.meta.get(coord)
@@ -117,6 +161,17 @@ class SparseGrid:
         meta = self.meta.get(coord)
         return None if meta is None else meta.parent
 
+    def growth_vector(self, coord: Coord) -> Coord:
+        meta = self.meta.get(coord)
+        return (0, 0) if meta is None else meta.growth_vector
+
+    def set_growth_vector(self, coord: Coord, vector: Coord) -> None:
+        meta = self._get_or_create_meta(coord)
+        vx = 0 if vector[0] == 0 else (1 if vector[0] > 0 else -1)
+        vy = 0 if vector[1] == 0 else (1 if vector[1] > 0 else -1)
+        meta.growth_vector = (vx, vy)
+        meta.last_touched_tick = self.tick
+
     def set_parent(self, coord: Coord, parent: Coord | None) -> None:
         if parent is None:
             return
@@ -149,7 +204,13 @@ class SparseGrid:
             self.set_parent(coord, parent)
         return coord
 
-    def activate(self, coord: Coord, parent: Coord | None = None, force_inherit: bool = False) -> Coord:
+    def activate(
+        self,
+        coord: Coord,
+        parent: Coord | None = None,
+        force_inherit: bool = False,
+        growth_vector: Coord | None = None,
+    ) -> Coord:
         was_missing = coord not in self.cells
         self.ensure(coord, parent=parent)
         self.pending_death.discard(coord)
@@ -170,6 +231,16 @@ class SparseGrid:
 
             self.set_mutation_type(coord, inherited_mutation)
             self.set_energy(coord, inherited_energy)
+            inherited_vector: Coord = (0, 0)
+            if growth_vector is not None:
+                inherited_vector = growth_vector
+            elif parent is not None and parent in self.cells:
+                parent_vector = self.growth_vector(parent)
+                if parent_vector != (0, 0):
+                    inherited_vector = parent_vector
+                else:
+                    inherited_vector = (coord[0] - parent[0], coord[1] - parent[1])
+            self.set_growth_vector(coord, inherited_vector)
             if coord in self.structural_cells:
                 self.set_energy(coord, self.max_energy(coord))
 
@@ -195,6 +266,14 @@ class SparseGrid:
         self.structural_cells.clear()
         self.structural_mutation.clear()
         self.coherence_match = False
+        self.current_radius = max(min(MAX_RADIUS, self.max_radius), self.min_radius)
+        self.coherence_high_streak = 0
+        self.coherence_low_streak = 0
+        self.last_coherence_percent = 0.0
+        self.food_clusters.clear()
+        self.outpost_anchors.clear()
+        self.overcrowded_structural_cells.clear()
+        self.structural_overcrowded_ticks.clear()
 
     def mark_for_death(self, coord: Coord) -> None:
         if coord in self.cells:
@@ -215,10 +294,86 @@ class SparseGrid:
 
     def is_within_bounds(self, coord: Coord) -> bool:
         x, y = coord
-        return abs(x) <= MAX_RADIUS and abs(y) <= MAX_RADIUS
+        return abs(x) <= self.current_radius and abs(y) <= self.current_radius
 
     def register_seed_anchor(self, origin: Coord) -> None:
         self.seed_anchors.add(origin)
+
+    def register_outpost_anchor(self, origin: Coord) -> None:
+        self.outpost_anchors.add(origin)
+        self.seed_anchors.add(origin)
+        self.structural_cells.add(origin)
+        self.structural_mutation.setdefault(origin, self.mutation_type(origin))
+
+    def remove_structural(self, coord: Coord) -> None:
+        self.structural_cells.discard(coord)
+        self.structural_mutation.pop(coord, None)
+        self.overcrowded_structural_cells.discard(coord)
+        self.structural_overcrowded_ticks.pop(coord, None)
+
+    def is_food(self, coord: Coord) -> bool:
+        return coord in self.food_clusters
+
+    def consume_food(self, coord: Coord) -> bool:
+        if coord not in self.food_clusters:
+            return False
+        self.food_clusters.discard(coord)
+        self.register_outpost_anchor(coord)
+        return True
+
+    def award_food_energy(self, coord: Coord) -> None:
+        boosted = min(self.max_energy(coord), self.energy(coord) + self.food_energy_bonus)
+        self.set_energy(coord, boosted)
+
+    def set_coherence_percent(self, coherence: float) -> None:
+        value = max(0.0, min(100.0, float(coherence)))
+        self.last_coherence_percent = value
+        if value >= self.coherence_high_threshold:
+            self.coherence_high_streak += 1
+        else:
+            self.coherence_high_streak = 0
+
+        if value <= self.coherence_low_threshold:
+            self.coherence_low_streak += 1
+        else:
+            self.coherence_low_streak = 0
+
+    def adapt_radius_from_coherence(self) -> None:
+        if self.coherence_high_streak >= self.coherence_expand_ticks:
+            self.current_radius = min(self.max_radius, self.current_radius + self.radius_step)
+            self.coherence_high_streak = 0
+
+        if self.coherence_low_streak >= self.coherence_contract_ticks:
+            self.current_radius = max(self.min_radius, self.current_radius - self.radius_step)
+            self.coherence_low_streak = 0
+
+    def maybe_spawn_food_clusters(self) -> None:
+        if self.food_spawn_interval <= 0:
+            return
+        if self.tick <= 0 or self.tick % self.food_spawn_interval != 0:
+            return
+
+        clusters = self.rng.randint(self.food_cluster_min, self.food_cluster_max)
+        min_dist = max(1.0, self.current_radius * self.food_min_distance_ratio)
+        max_dist = float(self.current_radius)
+
+        for _ in range(clusters):
+            placed = False
+            for _attempt in range(24):
+                distance = self.rng.uniform(min_dist, max_dist)
+                angle = self.rng.uniform(0.0, math.tau)
+                x = int(round(math.cos(angle) * distance))
+                y = int(round(math.sin(angle) * distance))
+                coord = (x, y)
+                if coord in self.cells or coord in self.food_clusters:
+                    continue
+                if not self.is_within_bounds(coord):
+                    continue
+                self.food_clusters.add(coord)
+                placed = True
+                break
+            if not placed:
+                continue
 
     def is_anchor_protected(self, coord: Coord) -> bool:
         cx, cy = coord
@@ -253,6 +408,7 @@ class SparseGrid:
         self.active_cells.discard(coord)
         self.static_ticks.pop(coord, None)
         self.survival_ticks.pop(coord, None)
+        self.structural_overcrowded_ticks.pop(coord, None)
         self.meta.pop(coord, None)
         self.mark_active(coord, include_neighbors=True)
 
