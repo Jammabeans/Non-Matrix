@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pygame
 
+from .modes import SimMode
 from .signal_coherence import coherence_percent_active, skeleton_pulse_alpha
 from .simulation import Simulation
 from .viewport import Viewport
@@ -10,6 +11,10 @@ BACKGROUND = (8, 10, 16)
 GRID_COLOR = (22, 28, 40)
 CELL_COLOR = (80, 220, 160)
 PARENT_LINE_COLOR = (70, 90, 130)
+TENSION_HIGH = (255, 70, 70, 220)
+TENSION_LOW = (95, 120, 165, 100)
+TARGET_LINK_MATCH = (90, 255, 140, 180)
+TARGET_LINK_MISMATCH = (120, 120, 120, 90)
 HEAT_COLOR = (255, 110, 30)
 TEXT_COLOR = (230, 235, 240)
 OLD_GROWTH_COLOR = (0, 255, 255)
@@ -18,6 +23,7 @@ STRUCTURAL_WHITE = (230, 245, 255)
 GHOST_BLUE = (90, 140, 255, 50)
 FOOD_COLOR = (255, 210, 90)
 OUTPOST_COLOR = (255, 245, 180)
+SUCCESS_COLOR = (255, 255, 255)
 PAUSED_BORDER_COLOR = (190, 50, 50)
 PAUSED_TEXT_COLOR = (255, 170, 170)
 CALCIFIED_COLOR = (255, 70, 70)
@@ -31,6 +37,16 @@ INFO_PANEL_WIDTH = 280
 ControlItem = tuple[str, str, str, float, float, float]
 
 CONTROL_PANEL_ITEMS: list[ControlItem] = [
+    ("Simulation Mode", "mode", "mode", 0.0, 0.0, 1.0),
+    ("Target Number", "target_number", "int", 1.0, 1.0, 1000000.0),
+    ("Render Every X Ticks", "render_every_x_ticks", "int", 1.0, 1.0, 50.0),
+    ("Logic Success Ticks", "logic_success_streak_ticks", "int", 1.0, 1.0, 200.0),
+    ("Logic Jolt Threshold", "logic_jolt_threshold_ticks", "int", 1.0, 1.0, 500.0),
+    ("Logic Jolt Bias", "logic_jolt_bias", "float", 0.05, 0.0, 1.0),
+    ("Logic Hot Flip", "logic_flip_hot_chance", "float", 0.01, 0.0, 1.0),
+    ("Logic Cold Flip", "logic_flip_cold_chance", "float", 0.005, 0.0, 0.2),
+    ("Logic Gate Hot", "logic_gate_hot_chance", "float", 0.01, 0.0, 1.0),
+    ("Logic Gate Cold", "logic_gate_cold_chance", "float", 0.005, 0.0, 0.2),
     ("Smell Decay", "smell_decay", "float", 0.01, 0.5, 0.999),
     ("Smell Diffusion", "smell_diffusion", "float", 0.01, 0.0, 1.0),
     ("Smell Food Source", "smell_food_source", "float", 0.25, 0.0, 30.0),
@@ -75,6 +91,16 @@ CONTROL_PANEL_ITEMS: list[ControlItem] = [
 ]
 
 CONTROL_PANEL_HELP: dict[str, str] = {
+    "mode": "Switches simulation engine mode between mycelium growth and logic-factorizer scaffolding.",
+    "target_number": "Desired multiplication target. Click Reset Logic Lattice to rebuild a dynamically sized loom.",
+    "render_every_x_ticks": "Only redraw the scene every N simulation ticks. Lower values are more responsive.",
+    "logic_success_streak_ticks": "Consecutive fully-correct ticks required before declaring solved and pausing.",
+    "logic_jolt_threshold_ticks": "No-change ticks before a thermal jolt is applied.",
+    "logic_jolt_bias": "Bias assigned to non-target bits during a thermal jolt.",
+    "logic_flip_hot_chance": "Flip chance when a parent bit is in a mismatched (hot) column.",
+    "logic_flip_cold_chance": "Flip chance when a parent bit is in a matched (stable) column.",
+    "logic_gate_hot_chance": "Flip chance for gate cells in mismatched columns.",
+    "logic_gate_cold_chance": "Flip chance for gate cells in matched columns.",
     "smell_decay": "Global decay per tick for smell traces. Higher values retain attractor trails longer.",
     "smell_diffusion": "Fraction of smell that spreads to neighboring tiles each tick.",
     "smell_food_source": "Smell source strength emitted by food clusters.",
@@ -120,17 +146,49 @@ CONTROL_PANEL_HELP: dict[str, str] = {
 
 
 def _format_control_value(value: object, kind: str) -> str:
+    if kind == "mode":
+        if isinstance(value, SimMode):
+            mode = value
+        else:
+            try:
+                mode = SimMode(str(value))
+            except ValueError:
+                mode = SimMode.MYCELIUM
+        return "MYCELIUM" if mode == SimMode.MYCELIUM else "LOGIC_FACTORIZER"
     if kind == "bool":
         return "ON" if bool(value) else "OFF"
     if kind == "int":
         return str(int(value))
-    return f"{float(value):.2f}"
+    fval = float(value)
+    if abs(fval) < 0.1:
+        return f"{fval:.4f}"
+    return f"{fval:.2f}"
 
 
 def _adjust_control_value(sim: Simulation, item: ControlItem, direction: int) -> None:
     label, attr, kind, step, min_value, max_value = item
     _ = label
     current = getattr(sim.grid, attr)
+    if kind == "mode":
+        modes = [SimMode.MYCELIUM, SimMode.LOGIC_FACTORIZER]
+        if isinstance(current, SimMode):
+            current_mode = current
+        else:
+            try:
+                current_mode = SimMode(str(current))
+            except ValueError:
+                current_mode = SimMode.MYCELIUM
+        idx = modes.index(current_mode)
+        delta = 1 if direction >= 0 else -1
+        next_mode = modes[(idx + delta) % len(modes)]
+        setattr(sim.grid, attr, next_mode)
+        if next_mode == SimMode.LOGIC_FACTORIZER and current_mode != SimMode.LOGIC_FACTORIZER:
+            sim.grid._init_logic_lattice()
+            sim.snapshot = set(sim.grid.alive_coords)
+            sim.snapshot_tick = sim.grid.tick
+            sim.peak_population = max(sim.peak_population, len(sim.grid.alive_coords))
+            sim.config.auto_step = True
+        return
     if kind == "bool":
         setattr(sim.grid, attr, not bool(current))
         return
@@ -160,9 +218,31 @@ def _wrap_text(text: str, font: pygame.font.Font, max_width: int) -> list[str]:
     return lines
 
 
+def _visible_control_items(sim: Simulation) -> list[ControlItem]:
+    if sim.grid.mode == SimMode.LOGIC_FACTORIZER:
+        return [
+            item
+            for item in CONTROL_PANEL_ITEMS
+            if item[1]
+            in {
+                "mode",
+                "target_number",
+                "render_every_x_ticks",
+                "logic_success_streak_ticks",
+                "logic_jolt_threshold_ticks",
+                "logic_jolt_bias",
+                "logic_flip_hot_chance",
+                "logic_flip_cold_chance",
+                "logic_gate_hot_chance",
+                "logic_gate_cold_chance",
+            }
+        ]
+    return list(CONTROL_PANEL_ITEMS)
+
+
 def _panel_layout(
     viewport: Viewport,
-    panel_index: int,
+    items: list[ControlItem],
     sidebar_width: int,
     panel_scroll: int = 0,
 ) -> tuple[pygame.Rect, list[tuple[int, pygame.Rect, pygame.Rect, pygame.Rect]]]:
@@ -170,9 +250,9 @@ def _panel_layout(
 
     line_h = 22
     max_rows = max(1, (panel_rect.height - 80) // line_h)
-    max_start = max(0, len(CONTROL_PANEL_ITEMS) - max_rows)
+    max_start = max(0, len(items) - max_rows)
     start = max(0, min(panel_scroll, max_start))
-    end = min(len(CONTROL_PANEL_ITEMS), start + max_rows)
+    end = min(len(items), start + max_rows)
 
     y = panel_rect.y + 44
     rows: list[tuple[int, pygame.Rect, pygame.Rect, pygame.Rect]] = []
@@ -195,8 +275,29 @@ MUTATION_COLORS: dict[int, tuple[int, int, int]] = {
     7: (245, 245, 130),  # Birth-band: yellow
 }
 
+LOGIC_MUTATION_COLORS: dict[int, tuple[int, int, int]] = {
+    0: (255, 70, 70),    # vivid red
+    1: (255, 165, 40),   # vivid orange
+    2: (245, 235, 70),   # vivid yellow
+    3: (110, 255, 110),  # vivid lime
+    4: (70, 240, 255),   # vivid cyan
+    5: (90, 150, 255),   # vivid blue
+    6: (190, 110, 255),  # vivid violet
+    7: (255, 255, 255),  # white (target lock)
+}
+
 
 def _cell_color(sim: Simulation, coord: tuple[int, int]) -> tuple[int, int, int]:
+    if sim.grid.mode == SimMode.LOGIC_FACTORIZER and coord in sim.grid.state:
+        if coord in sim.grid.logic_solved_cells:
+            return LOGIC_MUTATION_COLORS[7]
+        role = sim.grid.logic_role.get(coord, "gate")
+        if sim.grid.logic_solved and role in {"input_a", "input_b"}:
+            return SUCCESS_COLOR
+        base = LOGIC_MUTATION_COLORS[7] if role == "target" else LOGIC_MUTATION_COLORS.get(sim.grid.mutation_type(coord), CELL_COLOR)
+        if int(sim.grid.state.get(coord, 0)) == 0:
+            return (max(8, base[0] // 4), max(8, base[1] // 4), max(8, base[2] // 4))
+        return (min(255, int(base[0] * 1.35)), min(255, int(base[1] * 1.35)), min(255, int(base[2] * 1.35)))
     if sim.is_structural_at(coord):
         return STRUCTURAL_WHITE if ((coord[0] + coord[1]) & 1) == 0 else STRUCTURAL_BLUE
     if sim.is_old_growth_at(coord):
@@ -357,6 +458,134 @@ def _draw(
         if len(points) >= 3:
             pygame.draw.polygon(surface, color, points, width=1)
 
+    if sim.grid.mode == SimMode.LOGIC_FACTORIZER:
+        tension_surface = pygame.Surface((viewport.width, viewport.height), pygame.SRCALPHA)
+        input_a_coords = {coord for coord, role in sim.grid.logic_role.items() if role == "input_a"}
+        input_b_coords = {coord for coord, role in sim.grid.logic_role.items() if role == "input_b"}
+        gate_coords = [coord for coord, role in sim.grid.logic_role.items() if role == "gate"]
+        target_coords_le = sorted(
+            [coord for coord, role in sim.grid.logic_role.items() if role == "target"],
+            key=lambda c: c[0],
+            reverse=True,
+        )
+        target_bits_le = [1 if int(sim.grid.state.get(coord, 0)) != 0 else 0 for coord in target_coords_le]
+
+        # Column match state for gate->target links with carry propagation.
+        gate_cols = sorted({gx for gx, _ in gate_coords}, reverse=True)
+        col_index_by_x = {gx: idx for idx, gx in enumerate(gate_cols)}
+        carry_in = 0
+        column_match: dict[int, bool] = {}
+        extra_carry_match: dict[int, bool] = {}
+        for col_idx, gx in enumerate(gate_cols):
+            col = [coord for coord in gate_coords if coord[0] == gx]
+            active = sum(1 for coord in col if int(sim.grid.state.get(coord, 0)) != 0)
+            column_sum = active + carry_in
+            sum_bit = column_sum & 1
+            carry_out = column_sum >> 1
+            tbit = target_bits_le[col_idx] if col_idx < len(target_bits_le) else 0
+            column_match[gx] = sum_bit == tbit
+            carry_in = carry_out
+
+        for bit_idx in range(len(gate_cols), len(target_bits_le)):
+            bit = carry_in & 1
+            carry_in >>= 1
+            extra_carry_match[bit_idx] = bit == target_bits_le[bit_idx]
+
+        def _jitter(seed: int) -> tuple[int, int]:
+            dx = ((seed * 17) % 5) - 2
+            dy = ((seed * 31) % 5) - 2
+            return dx, dy
+
+        def _loop_line(
+            surface: pygame.Surface,
+            start: tuple[int, int],
+            end: tuple[int, int],
+            color: tuple[int, int, int, int],
+            width: int,
+            direction: int,
+            magnitude: float = 16.0,
+        ) -> None:
+            sx, sy = start
+            ex, ey = end
+            mx = (sx + ex) / 2.0
+            my = (sy + ey) / 2.0
+            dx = ex - sx
+            dy = ey - sy
+            norm = max(1.0, (dx * dx + dy * dy) ** 0.5)
+            # Perpendicular offset for an outward loop-like arc.
+            ox = (-dy / norm) * magnitude * (1 if direction >= 0 else -1)
+            oy = (dx / norm) * magnitude * (1 if direction >= 0 else -1)
+            c1 = (int((sx * 0.6) + (mx * 0.4) + ox), int((sy * 0.6) + (my * 0.4) + oy))
+            c2 = (int((sx * 0.4) + (mx * 0.6) + ox), int((sy * 0.4) + (my * 0.6) + oy))
+            points = [start, c1, c2, end]
+            pygame.draw.lines(surface, color, False, points, width)
+
+        for gate in gate_coords:
+            gx, gy = gate
+            a_parent = (10, gy)
+            b_parent = (gx, 10)
+            if a_parent not in input_a_coords or b_parent not in input_b_coords:
+                continue
+
+            a_bit = 1 if int(sim.grid.state.get(a_parent, 0)) != 0 else 0
+            b_bit = 1 if int(sim.grid.state.get(b_parent, 0)) != 0 else 0
+            g_bit = 1 if int(sim.grid.state.get(gate, 0)) != 0 else 0
+            satisfied = g_bit == (a_bit & b_bit)
+
+            gsx, gsy = viewport.world_to_screen(gx, gy)
+            asx, asy = viewport.world_to_screen(a_parent[0], a_parent[1])
+            bsx, bsy = viewport.world_to_screen(b_parent[0], b_parent[1])
+            gpt = (gsx + (size // 2), gsy + (size // 2))
+            apt = (asx + (size // 2), asy + (size // 2))
+            bpt = (bsx + (size // 2), bsy + (size // 2))
+
+            if satisfied:
+                pygame.draw.line(tension_surface, TENSION_LOW, gpt, apt, 2)
+                pygame.draw.line(tension_surface, TENSION_LOW, gpt, bpt, 2)
+            else:
+                jx, jy = _jitter(hash((gate, now_tick)))
+                gj = (gpt[0] + jx, gpt[1] + jy)
+                aj = (apt[0] - jx, apt[1] - jy)
+                bj = (bpt[0] + jy, bpt[1] - jx)
+                # Red high-tension lines arc outward in one direction.
+                _loop_line(tension_surface, gj, aj, TENSION_HIGH, 2, direction=1, magnitude=18.0)
+                _loop_line(tension_surface, gj, bj, TENSION_HIGH, 2, direction=1, magnitude=18.0)
+
+            tcoord = None
+            col_idx = col_index_by_x.get(gx)
+            if col_idx is not None and col_idx < len(target_coords_le):
+                tcoord = target_coords_le[col_idx]
+            if tcoord is not None:
+                tsx, tsy = viewport.world_to_screen(tcoord[0], tcoord[1])
+                tpt = (tsx + (size // 2), tsy + (size // 2))
+                link_color = TARGET_LINK_MATCH if column_match.get(gx, False) else TARGET_LINK_MISMATCH
+                link_w = 2 if column_match.get(gx, False) else 1
+                if column_match.get(gx, False):
+                    # Green match lines arc in the opposite direction from red.
+                    _loop_line(tension_surface, gpt, tpt, link_color, link_w, direction=-1, magnitude=14.0)
+                else:
+                    pygame.draw.line(tension_surface, link_color, gpt, tpt, link_w)
+
+        # Carry links from left-most gate column to high-order target bits.
+        if gate_cols and len(target_coords_le) > len(gate_cols):
+            left_col_x = min(gate_cols)
+            bottom_row_y = max((gy for _, gy in gate_coords), default=0)
+            lsx, lsy = viewport.world_to_screen(left_col_x, bottom_row_y)
+            carry_anchor = (lsx + (size // 2), lsy + (size // 2))
+            for bit_idx in range(len(gate_cols), len(target_coords_le)):
+                tcoord = target_coords_le[bit_idx]
+                tsx, tsy = viewport.world_to_screen(tcoord[0], tcoord[1])
+                tpt = (tsx + (size // 2), tsy + (size // 2))
+                match = extra_carry_match.get(bit_idx, False)
+                link_color = TARGET_LINK_MATCH if match else TARGET_LINK_MISMATCH
+                link_w = 2 if match else 1
+                if match:
+                    _loop_line(tension_surface, carry_anchor, tpt, link_color, link_w, direction=-1, magnitude=10.0)
+                else:
+                    pygame.draw.line(tension_surface, link_color, carry_anchor, tpt, link_w)
+
+        screen.blit(tension_surface, (0, 0))
+
     for coord in sampled_cells:
         parent = sim.parent_at(coord)
         if parent is not None:
@@ -390,8 +619,18 @@ def _draw(
         for coord in sampled_cells:
             sx, sy = viewport.world_to_screen(coord[0], coord[1])
             rect = pygame.Rect(sx, sy, size, size)
-            base_color = _cell_color(sim, coord)
-            if coord in sim.grid.overcrowded_structural_cells:
+            solved_override = sim.grid.mode == SimMode.LOGIC_FACTORIZER and bool(sim.grid.logic_solved_cells) and coord in sim.grid.logic_solved_cells
+            if solved_override:
+                role = sim.grid.logic_role.get(coord, "gate")
+                state = 1 if int(sim.grid.state.get(coord, 0)) != 0 else 0
+                if role in {"input_a", "input_b", "target"}:
+                    base_color = (255, 255, 255) if state == 1 else (70, 70, 70)
+                else:
+                    gate_base = LOGIC_MUTATION_COLORS.get(sim.grid.mutation_type(coord), (180, 180, 180))
+                    base_color = gate_base if state == 1 else (50, 50, 50)
+            else:
+                base_color = _cell_color(sim, coord)
+            if (not solved_override) and coord in sim.grid.overcrowded_structural_cells:
                 base_color = CALCIFIED_COLOR
             screen.fill(base_color, rect)
 
@@ -409,7 +648,7 @@ def _draw(
             age = now_tick - sim.grid.last_touched_tick(coord)
             
             intensity = 0
-            if sim.grid.energy(coord) >= heat_threshold:
+            if sim.grid.mode != SimMode.LOGIC_FACTORIZER and sim.grid.energy(coord) >= heat_threshold:
                 age = now_tick - sim.last_touched_at(coord)
                 intensity = max(0, min(180, 180 - (age * 8)))
             if intensity > 0:
@@ -462,7 +701,16 @@ def _draw(
         screen.blit(overlay, (ox, oy))
         pygame.draw.rect(screen, PAUSED_BORDER_COLOR, pygame.Rect(2, 2, viewport.width - 4, viewport.height - 4), width=2)
 
-    panel_rect, rows = _panel_layout(viewport, panel_index, sidebar_width, panel_scroll=panel_scroll)
+    if sim.grid.mode == SimMode.LOGIC_FACTORIZER and sim.grid.logic_jolt_notice_ticks > 0:
+        jolt_text = font.render("System Stagnant - Applying Thermal Jolt", True, (255, 220, 120))
+        jx = max(10, (viewport.width - jolt_text.get_width()) // 2)
+        jy = 12
+        screen.blit(jolt_text, (jx, jy))
+
+    visible_items = _visible_control_items(sim)
+    if panel_index >= len(visible_items):
+        panel_index = max(0, len(visible_items) - 1)
+    panel_rect, rows = _panel_layout(viewport, visible_items, sidebar_width, panel_scroll=panel_scroll)
     pygame.draw.rect(root_screen, PANEL_BG, panel_rect)
     pygame.draw.rect(root_screen, PANEL_BORDER, panel_rect, width=2)
 
@@ -472,7 +720,7 @@ def _draw(
     hovered_attr: str | None = None
     mouse_pos = pygame.mouse.get_pos()
     for idx, row_rect, minus_rect, plus_rect in rows:
-        label, attr, kind, *_ = CONTROL_PANEL_ITEMS[idx]
+        label, attr, kind, *_ = visible_items[idx]
         value = _format_control_value(getattr(sim.grid, attr), kind)
         color = PANEL_ACTIVE if idx == panel_index else PANEL_TEXT
         compact_label = label if len(label) <= 26 else f"{label[:25]}…"
@@ -491,6 +739,16 @@ def _draw(
 
     hint = panel_font.render("Enter submits seed when text exists.", True, PANEL_TEXT)
     root_screen.blit(hint, (panel_rect.x + 10, panel_rect.bottom - 28))
+
+    logic_reset_rect = pygame.Rect(panel_rect.x + 10, panel_rect.bottom - 54, panel_rect.width - 20, 20)
+    logic_active = sim.grid.mode == SimMode.LOGIC_FACTORIZER
+    logic_btn_bg = (36, 64, 96) if logic_active else (28, 34, 44)
+    logic_btn_border = PANEL_ACTIVE if logic_active else PANEL_BORDER
+    pygame.draw.rect(root_screen, logic_btn_bg, logic_reset_rect)
+    pygame.draw.rect(root_screen, logic_btn_border, logic_reset_rect, width=1)
+    logic_label = "Reset Logic Lattice"
+    logic_text = panel_font.render(logic_label, True, PANEL_TEXT if logic_active else (160, 170, 185))
+    root_screen.blit(logic_text, (logic_reset_rect.x + 8, logic_reset_rect.y + 3))
 
     pygame.draw.rect(root_screen, PANEL_BG, info_rect)
     pygame.draw.rect(root_screen, PANEL_BORDER, info_rect, width=2)
@@ -511,6 +769,18 @@ def _draw(
         f"zoom: {viewport.cell_size:.2f}",
         "panel: LEFT(settings)",
     ]
+    if sim.grid.mode == SimMode.LOGIC_FACTORIZER:
+        input_a = sorted((coord for coord, role in sim.grid.logic_role.items() if role == "input_a"), key=lambda c: c[1], reverse=True)
+        input_b = sorted((coord for coord, role in sim.grid.logic_role.items() if role == "input_b"), key=lambda c: c[0], reverse=True)
+        target_bits = [
+            1 if int(sim.grid.state.get(coord, 0)) != 0 else 0
+            for coord in sorted((coord for coord, role in sim.grid.logic_role.items() if role == "target"), key=lambda c: c[0], reverse=True)
+        ]
+        target_value = sum((bit << i) for i, bit in enumerate(target_bits))
+        a_value = sum((1 << i) for i, coord in enumerate(input_a) if int(sim.grid.state.get(coord, 0)) != 0)
+        b_value = sum((1 << i) for i, coord in enumerate(input_b) if int(sim.grid.state.get(coord, 0)) != 0)
+        info_lines.append(f"Target: {target_value}")
+        info_lines.append(f"Current Guess: {a_value} x {b_value} = {a_value * b_value}")
     iy = info_rect.y + 42
     for line in info_lines:
         txt = panel_font.render(line, True, PANEL_TEXT)
@@ -521,27 +791,43 @@ def _draw(
     root_screen.blit(legend_title, (info_rect.x + 10, iy + 8))
     iy += 34
 
-    legend_items: list[tuple[str, str, tuple[int, int, int]]] = [
-        ("Live Cell", "swatch", CELL_COLOR),
-        ("Old Growth", "swatch", OLD_GROWTH_COLOR),
-        ("Structural (Blue)", "swatch", STRUCTURAL_BLUE),
-        ("Structural (White)", "swatch", STRUCTURAL_WHITE),
-        ("Structural Ghost", "swatch", (GHOST_BLUE[0], GHOST_BLUE[1], GHOST_BLUE[2])),
-        ("Calcified/Overcrowded", "swatch", CALCIFIED_COLOR),
-        ("Food", "swatch", FOOD_COLOR),
-        ("Outpost Anchor (star)", "star", OUTPOST_COLOR),
-        ("Lineage Link", "line", PARENT_LINE_COLOR),
-        ("Space Grid", "line", GRID_COLOR),
-        ("Heat", "swatch", HEAT_COLOR),
-        ("Mutation M0", "swatch", MUTATION_COLORS[0]),
-        ("Mutation M1", "swatch", MUTATION_COLORS[1]),
-        ("Mutation M2", "swatch", MUTATION_COLORS[2]),
-        ("Mutation M3", "swatch", MUTATION_COLORS[3]),
-        ("Mutation M4", "swatch", MUTATION_COLORS[4]),
-        ("Mutation M5", "swatch", MUTATION_COLORS[5]),
-        ("Mutation M6", "swatch", MUTATION_COLORS[6]),
-        ("Mutation M7", "swatch", MUTATION_COLORS[7]),
-    ]
+    if sim.grid.mode == SimMode.LOGIC_FACTORIZER:
+        legend_items: list[tuple[str, str, tuple[int, int, int]]] = [
+            ("Input / Gate OFF", "swatch", (48, 48, 48)),
+            ("Input / Gate ON", "swatch", LOGIC_MUTATION_COLORS[4]),
+            ("Target (Locked)", "swatch", LOGIC_MUTATION_COLORS[7]),
+            ("Resolved Inputs", "swatch", SUCCESS_COLOR),
+            ("Logic M0", "swatch", LOGIC_MUTATION_COLORS[0]),
+            ("Logic M1", "swatch", LOGIC_MUTATION_COLORS[1]),
+            ("Logic M2", "swatch", LOGIC_MUTATION_COLORS[2]),
+            ("Logic M3", "swatch", LOGIC_MUTATION_COLORS[3]),
+            ("Logic M4", "swatch", LOGIC_MUTATION_COLORS[4]),
+            ("Logic M5", "swatch", LOGIC_MUTATION_COLORS[5]),
+            ("Logic M6", "swatch", LOGIC_MUTATION_COLORS[6]),
+            ("Logic M7", "swatch", LOGIC_MUTATION_COLORS[7]),
+        ]
+    else:
+        legend_items = [
+            ("Live Cell", "swatch", CELL_COLOR),
+            ("Old Growth", "swatch", OLD_GROWTH_COLOR),
+            ("Structural (Blue)", "swatch", STRUCTURAL_BLUE),
+            ("Structural (White)", "swatch", STRUCTURAL_WHITE),
+            ("Structural Ghost", "swatch", (GHOST_BLUE[0], GHOST_BLUE[1], GHOST_BLUE[2])),
+            ("Calcified/Overcrowded", "swatch", CALCIFIED_COLOR),
+            ("Food", "swatch", FOOD_COLOR),
+            ("Outpost Anchor (star)", "star", OUTPOST_COLOR),
+            ("Lineage Link", "line", PARENT_LINE_COLOR),
+            ("Space Grid", "line", GRID_COLOR),
+            ("Heat", "swatch", HEAT_COLOR),
+            ("Mutation M0", "swatch", MUTATION_COLORS[0]),
+            ("Mutation M1", "swatch", MUTATION_COLORS[1]),
+            ("Mutation M2", "swatch", MUTATION_COLORS[2]),
+            ("Mutation M3", "swatch", MUTATION_COLORS[3]),
+            ("Mutation M4", "swatch", MUTATION_COLORS[4]),
+            ("Mutation M5", "swatch", MUTATION_COLORS[5]),
+            ("Mutation M6", "swatch", MUTATION_COLORS[6]),
+            ("Mutation M7", "swatch", MUTATION_COLORS[7]),
+        ]
     for label, kind, color in legend_items:
         swatch = pygame.Rect(info_rect.x + 10, iy + 2, 12, 12)
         if kind == "star":
@@ -559,7 +845,7 @@ def _draw(
 
     if hovered_attr is not None:
         help_text = CONTROL_PANEL_HELP.get(hovered_attr, "No description available.")
-        setting_label = next((label for label, attr, *_ in CONTROL_PANEL_ITEMS if attr == hovered_attr), hovered_attr)
+        setting_label = next((label for label, attr, *_ in visible_items if attr == hovered_attr), hovered_attr)
         help_rect = pygame.Rect(info_rect.x + 10, info_rect.bottom - 150, info_rect.width - 20, 138)
         pygame.draw.rect(root_screen, (24, 30, 42), help_rect)
         pygame.draw.rect(root_screen, PANEL_ACTIVE, help_rect, width=1)
@@ -619,18 +905,30 @@ def main() -> None:
                 running = False
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1:
-                    panel_rect, rows = _panel_layout(viewport, panel_index, SIDEBAR_WIDTH, panel_scroll=panel_scroll)
+                    logic_reset_rect = pygame.Rect(10, viewport.height - 54, SIDEBAR_WIDTH - 20, 20)
+                    if logic_reset_rect.collidepoint(event.pos) and sim.grid.mode == SimMode.LOGIC_FACTORIZER:
+                        sim.grid._init_logic_lattice()
+                        sim.snapshot = set(sim.grid.alive_coords)
+                        sim.snapshot_tick = sim.grid.tick
+                        sim.peak_population = max(sim.peak_population, len(sim.grid.alive_coords))
+                        sim.config.auto_step = True
+                        continue
+
+                    visible_items = _visible_control_items(sim)
+                    if panel_index >= len(visible_items):
+                        panel_index = max(0, len(visible_items) - 1)
+                    panel_rect, rows = _panel_layout(viewport, visible_items, SIDEBAR_WIDTH, panel_scroll=panel_scroll)
                     if panel_rect.collidepoint(event.pos):
                         handled = False
                         for idx, row_rect, minus_rect, plus_rect in rows:
                             if minus_rect.collidepoint(event.pos):
                                 panel_index = idx
-                                _adjust_control_value(sim, CONTROL_PANEL_ITEMS[panel_index], direction=-1)
+                                _adjust_control_value(sim, visible_items[panel_index], direction=-1)
                                 handled = True
                                 break
                             if plus_rect.collidepoint(event.pos):
                                 panel_index = idx
-                                _adjust_control_value(sim, CONTROL_PANEL_ITEMS[panel_index], direction=1)
+                                _adjust_control_value(sim, visible_items[panel_index], direction=1)
                                 handled = True
                                 break
                             if row_rect.collidepoint(event.pos):
@@ -640,10 +938,13 @@ def main() -> None:
                         if handled:
                             line_h = 22
                             max_rows = max(1, (viewport.height - 80) // line_h)
+                            visible_items = _visible_control_items(sim)
                             if panel_index < panel_scroll:
                                 panel_scroll = panel_index
                             elif panel_index >= panel_scroll + max_rows:
                                 panel_scroll = panel_index - max_rows + 1
+                            max_start = max(0, len(visible_items) - max_rows)
+                            panel_scroll = max(0, min(panel_scroll, max_start))
                             continue
 
                     if event.pos[0] < SIDEBAR_WIDTH or event.pos[0] >= (SIDEBAR_WIDTH + viewport.width):
@@ -661,7 +962,8 @@ def main() -> None:
                     if event.pos[0] < SIDEBAR_WIDTH:
                         line_h = 22
                         max_rows = max(1, (viewport.height - 80) // line_h)
-                        max_start = max(0, len(CONTROL_PANEL_ITEMS) - max_rows)
+                        visible_items = _visible_control_items(sim)
+                        max_start = max(0, len(visible_items) - max_rows)
                         panel_scroll = min(max_start, panel_scroll + 2)
                         continue
                     if SIDEBAR_WIDTH <= event.pos[0] < (SIDEBAR_WIDTH + viewport.width):
@@ -687,16 +989,22 @@ def main() -> None:
                     sim.config.auto_step = False
                     accumulator = 0.0
                 elif event.key in (pygame.K_UP, pygame.K_DOWN, pygame.K_LEFT, pygame.K_RIGHT, pygame.K_RETURN):
+                    visible_items = _visible_control_items(sim)
+                    if panel_index >= len(visible_items):
+                        panel_index = max(0, len(visible_items) - 1)
                     if event.key == pygame.K_UP:
                         panel_index = max(0, panel_index - 1)
                     elif event.key == pygame.K_DOWN:
-                        panel_index = min(len(CONTROL_PANEL_ITEMS) - 1, panel_index + 1)
+                        panel_index = min(len(visible_items) - 1, panel_index + 1)
                     elif event.key == pygame.K_LEFT:
-                        _adjust_control_value(sim, CONTROL_PANEL_ITEMS[panel_index], direction=-1)
+                        if visible_items:
+                            _adjust_control_value(sim, visible_items[panel_index], direction=-1)
                     elif event.key == pygame.K_RIGHT:
-                        _adjust_control_value(sim, CONTROL_PANEL_ITEMS[panel_index], direction=1)
+                        if visible_items:
+                            _adjust_control_value(sim, visible_items[panel_index], direction=1)
                     elif event.key == pygame.K_RETURN:
-                        _adjust_control_value(sim, CONTROL_PANEL_ITEMS[panel_index], direction=1)
+                        if visible_items:
+                            _adjust_control_value(sim, visible_items[panel_index], direction=1)
 
                     line_h = 22
                     max_rows = max(1, (viewport.height - 80) // line_h)
@@ -714,31 +1022,44 @@ def main() -> None:
                     input_text += event.unicode
 
         fps = clock.get_fps()
-        render_stride = 4 if fps > 0 and fps < 15 else 1
+        render_stride = 1 if sim.grid.mode == SimMode.LOGIC_FACTORIZER else (4 if fps > 0 and fps < 15 else 1)
+        render_every = max(1, int(getattr(sim.grid, "render_every_x_ticks", 1)))
+        force_final_render = bool(getattr(sim.grid, "needs_final_render", False))
+        current_tick = int(getattr(sim.grid, "tick", 0))
+        should_draw = force_final_render or (current_tick % render_every == 0)
+        visible_items = _visible_control_items(sim)
+        if panel_index >= len(visible_items):
+            panel_index = max(0, len(visible_items) - 1)
         snapshot = sim.snapshot_coords()
         structural_snapshot = sim.structural_coords_snapshot()
         food_snapshot = sim.food_coords_snapshot()
         outpost_snapshot = sim.outpost_coords_snapshot()
         seed_history = sim.seed_history_snapshot()
-        _draw(
-            sim,
-            viewport,
-            screen,
-            font,
-            panel_font,
-            input_text,
-            alive_coords=snapshot,
-            structural_coords=structural_snapshot,
-            food_coords=food_snapshot,
-            outpost_coords=outpost_snapshot,
-            seed_history=seed_history,
-            snapshot_tick=sim.snapshot_tick,
-            panel_index=panel_index,
-            panel_scroll=panel_scroll,
-            sidebar_width=SIDEBAR_WIDTH,
-            render_stride=render_stride,
-        )
-        pygame.display.flip()
+        if should_draw:
+            _draw(
+                sim,
+                viewport,
+                screen,
+                font,
+                panel_font,
+                input_text,
+                alive_coords=snapshot,
+                structural_coords=structural_snapshot,
+                food_coords=food_snapshot,
+                outpost_coords=outpost_snapshot,
+                seed_history=seed_history,
+                snapshot_tick=sim.snapshot_tick,
+                panel_index=panel_index,
+                panel_scroll=panel_scroll,
+                sidebar_width=SIDEBAR_WIDTH,
+                render_stride=render_stride,
+            )
+            pygame.display.flip()
+
+        if force_final_render:
+            sim.grid.needs_final_render = False
+            sim.config.auto_step = False
+            pygame.display.flip()
 
     sim.stop_heartbeat()
     pygame.quit()

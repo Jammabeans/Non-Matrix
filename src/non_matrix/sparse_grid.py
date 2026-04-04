@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from collections.abc import Iterator
 
 from .cell import Coord, MAX_ENERGY
+from .modes import SimMode
 
 MAX_CELLS = 25_000
 MAX_RADIUS = 500
@@ -105,6 +106,27 @@ class SparseGrid:
         self.vector_bias_maturity_ticks: int = 5
         self.vector_cone_degrees: float = 45.0
         self.lateral_inhibition_enabled: bool = True
+        self.mode: SimMode = SimMode.MYCELIUM
+        self.p_bias: dict[Coord, float] = {}
+        self.state: dict[Coord, int] = {}
+        self.logic_role: dict[Coord, str] = {}
+        self.logic_success_streak: int = 0
+        self.logic_solved: bool = False
+        self.logic_pause_requested: bool = False
+        self.logic_resume_requested: bool = False
+        self.logic_stagnation_ticks: int = 0
+        self.logic_jolt_notice_ticks: int = 0
+        self.logic_solved_cells: set[Coord] = set()
+        self.logic_success_streak_ticks: int = 3
+        self.logic_jolt_threshold_ticks: int = 20
+        self.logic_jolt_bias: float = 0.8
+        self.logic_flip_hot_chance: float = 0.95
+        self.logic_flip_cold_chance: float = 0.005
+        self.logic_gate_hot_chance: float = 0.85
+        self.logic_gate_cold_chance: float = 0.01
+        self.target_number: int = 35
+        self.render_every_x_ticks: int = 5
+        self.needs_final_render: bool = False
 
         # Deterministic exploration fields.
         self.smell_field: dict[Coord, float] = {}
@@ -293,7 +315,78 @@ class SparseGrid:
         self.structural_overcrowded_ticks.clear()
         self.smell_field.clear()
         self.path_memory.clear()
+        self.p_bias.clear()
+        self.state.clear()
+        self.logic_role.clear()
+        self.logic_success_streak = 0
+        self.logic_solved = False
+        self.logic_pause_requested = False
+        self.logic_resume_requested = False
+        self.logic_stagnation_ticks = 0
+        self.logic_jolt_notice_ticks = 0
+        self.logic_solved_cells.clear()
+        self.needs_final_render = False
         self.rng = random.Random(self.rng_seed)
+
+    def _init_logic_lattice(self) -> None:
+        """Initialize a dynamic N x N logic loom based on target_number."""
+        self.clear()
+        self.logic_success_streak = 0
+        self.logic_solved = False
+        self.logic_pause_requested = False
+        self.logic_resume_requested = False
+        self.logic_stagnation_ticks = 0
+        self.logic_jolt_notice_ticks = 0
+        self.logic_solved_cells.clear()
+        self.needs_final_render = False
+
+        target_value = max(1, int(self.target_number))
+
+        bits_needed = 1
+        while ((1 << bits_needed) - 1) * ((1 << bits_needed) - 1) < target_value:
+            bits_needed += 1
+        result_bits = max(1, target_value.bit_length())
+
+        spacing = 5
+        input_a_x = 10
+        input_b_y = 10
+        input_a_y0 = 15
+        input_b_x0 = 15
+
+        input_a = [(input_a_x, input_a_y0 + (i * spacing)) for i in range(bits_needed)]
+        input_b = [(input_b_x0 + (i * spacing), input_b_y) for i in range(bits_needed)]
+        gates = [(bx, ay) for _, ay in input_a for bx, _ in input_b]
+        target_y = input_a_y0 + (bits_needed * spacing) + 10
+        target = [(input_a_x + (i * spacing), target_y) for i in range(result_bits)]
+        target_bits_le = [((target_value >> i) & 1) for i in range(result_bits)]
+
+        def _place(coord: Coord, role: str, p_bias: float, state: int, mutation_override: int | None = None) -> None:
+            self.activate(coord)
+            self.p_bias[coord] = max(0.0, min(1.0, float(p_bias)))
+            self.state[coord] = 1 if int(state) != 0 else 0
+            self.logic_role[coord] = role
+            self.structural_cells.add(coord)
+            mut = int(round(self.p_bias[coord] * 7.0)) if mutation_override is None else int(mutation_override)
+            self.structural_mutation[coord] = max(0, min(7, mut))
+            self.set_mutation_type(coord, self.structural_mutation[coord])
+            self.set_energy(coord, self.max_energy(coord))
+
+        for coord in input_a:
+            _place(coord, role="input_a", p_bias=0.5, state=self.rng.randint(0, 1))
+
+        for coord in input_b:
+            _place(coord, role="input_b", p_bias=0.5, state=self.rng.randint(0, 1))
+
+        for coord in gates:
+            _place(coord, role="gate", p_bias=0.5, state=self.rng.randint(0, 1))
+
+        target_bits_by_coord: dict[Coord, int] = {}
+        for bit_index, coord in enumerate(sorted(target, key=lambda c: c[0], reverse=True)):
+            bit = target_bits_le[bit_index] if bit_index < len(target_bits_le) else 0
+            target_bits_by_coord[coord] = bit
+
+        for coord in target:
+            _place(coord, role="target", p_bias=1.0, state=target_bits_by_coord.get(coord, 0), mutation_override=7)
 
     def update_exploration_fields(self) -> None:
         """Update deterministic smell and path-memory fields each tick."""

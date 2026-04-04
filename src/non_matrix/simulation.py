@@ -30,10 +30,18 @@ class Simulation:
     def step(self) -> None:
         with self._lock:
             step_life(self.grid)
-            self.peak_population = max(self.peak_population, len(self.grid.alive_coords))
-            if self.grid.tick % 5 == 0:
+            if self.grid.logic_resume_requested:
+                self.config.auto_step = True
+                self.grid.logic_resume_requested = False
+            if self.grid.logic_pause_requested:
+                # Force a final solved-frame snapshot before pausing.
                 self.snapshot = set(self.grid.alive_coords)
                 self.snapshot_tick = self.grid.tick
+                self.config.auto_step = False
+                self.grid.logic_pause_requested = False
+            self.peak_population = max(self.peak_population, len(self.grid.alive_coords))
+            self.snapshot = set(self.grid.alive_coords)
+            self.snapshot_tick = self.grid.tick
 
     def start_heartbeat(self) -> None:
         if self._running:

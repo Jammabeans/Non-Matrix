@@ -5,6 +5,7 @@ from collections import Counter
 from collections.abc import Callable
 
 from .cell import Coord
+from .modes import SimMode
 from .sparse_grid import MAX_CELLS, MOORE_OFFSETS, SparseGrid
 
 
@@ -207,7 +208,7 @@ def _within_cone(step_vec: Coord, forward_vec: Coord, cone_degrees: float) -> bo
     return (dot * dot) >= (step_norm_sq * fwd_norm_sq * (cos_threshold * cos_threshold))
 
 
-def step_life(grid: SparseGrid) -> None:
+def _step_life_mycelium(grid: SparseGrid) -> None:
     """Advance one tick using local mutation-rule physics."""
     grid.update_exploration_fields()
     prior_active = max(1, len(grid.active_cells))
@@ -480,4 +481,237 @@ def step_life(grid: SparseGrid) -> None:
         grid.cooldown_ticks -= 1
 
     grid.maybe_spawn_food_clusters()
+
+
+def _p_bias_to_mutation_type(p_bias: float) -> int:
+    bounded = max(0.0, min(1.0, float(p_bias)))
+    return int(round(bounded * 7.0))
+
+
+def _step_life_logic_factorizer(grid: SparseGrid) -> None:
+    """Full-adder pressure stepping for multiplication matrix mode."""
+    grid.tick += 1
+    prev_state = dict(grid.state)
+
+    if grid.logic_solved:
+        grid.logic_pause_requested = True
+        return
+
+    grid.logic_pause_requested = False
+
+    input_a = sorted((coord for coord, role in grid.logic_role.items() if role == "input_a"), key=lambda c: c[1])
+    input_b = sorted((coord for coord, role in grid.logic_role.items() if role == "input_b"), key=lambda c: c[0])
+    input_a_bits = sorted(input_a, key=lambda c: c[1], reverse=True)  # little-endian: bottom bit = 1
+    input_b_bits = sorted(input_b, key=lambda c: c[0], reverse=True)  # little-endian: right bit = 1
+    target = sorted((coord for coord, role in grid.logic_role.items() if role == "target"), key=lambda c: c[0])
+    target_set = set(target)
+    hot_flip = max(0.0, min(1.0, float(grid.logic_flip_hot_chance)))
+    cold_flip = max(0.0, min(1.0, float(grid.logic_flip_cold_chance)))
+    gate_hot = max(0.0, min(1.0, float(grid.logic_gate_hot_chance)))
+    gate_cold = max(0.0, min(1.0, float(grid.logic_gate_cold_chance)))
+
+    pressure: dict[Coord, float] = {coord: 0.0 for coord in grid.state.keys()}
+    flip_prob: dict[Coord, float] = {coord: 0.05 for coord in grid.state.keys()}
+
+    def _set_hot(coord: Coord, strength: float = 0.95) -> None:
+        flip_prob[coord] = max(flip_prob.get(coord, 0.0), max(0.0, min(0.95, strength)))
+
+    def _set_cold(coord: Coord, strength: float = 0.005) -> None:
+        if flip_prob.get(coord, 0.0) < 0.95:
+            flip_prob[coord] = min(flip_prob.get(coord, 1.0), max(0.0, strength))
+    column_match_flags: list[bool] = []
+    carry_in = 0
+
+    gate_cols = sorted({coord[0] for coord, role in grid.logic_role.items() if role == "gate"})
+    target_sorted_le = sorted(target, key=lambda c: c[0], reverse=True)
+    target_bits_le = [1 if int(grid.state.get(coord, 0)) != 0 else 0 for coord in target_sorted_le]
+    target_value = sum((bit << i) for i, bit in enumerate(target_bits_le))
+    target_bits_by_coord = {coord: bit for coord, bit in zip(target_sorted_le, target_bits_le, strict=False)}
+    all_gate_coords = [coord for coord, role in grid.logic_role.items() if role == "gate"]
+
+    column_output_bits: list[int] = []
+    column_match_by_x: dict[int, bool] = {}
+
+    # Full-adder style from right (LSB side) to left, with carry propagation across gate columns.
+    for col_index, gx in enumerate(reversed(gate_cols)):
+        gate_col = [coord for coord, role in grid.logic_role.items() if role == "gate" and coord[0] == gx]
+        active = sum(1 for coord in gate_col if int(grid.state.get(coord, 0)) != 0)
+        column_sum = active + carry_in
+        sum_bit = column_sum & 1
+        carry_out = column_sum >> 1
+
+        target_bit = target_bits_le[col_index] if col_index < len(target_bits_le) else 0
+        match = sum_bit == target_bit
+        column_match_flags.append(match)
+        column_output_bits.append(sum_bit)
+        column_match_by_x[gx] = match
+
+        if not match:
+            # Massive pressure to all participants of the failing column.
+            for a_coord in input_a:
+                pressure[a_coord] = pressure.get(a_coord, 0.0) + 2.0
+                _set_hot(a_coord, hot_flip)
+                if grid.rng.random() < 0.90:
+                    cur = 1 if int(grid.state.get(a_coord, 0)) != 0 else 0
+                    grid.p_bias[a_coord] = 0.9 if cur == 0 else 0.1
+            b_coord = next((coord for coord in input_b if coord[0] == gx), None)
+            if b_coord is not None:
+                pressure[b_coord] = pressure.get(b_coord, 0.0) + 2.0
+                _set_hot(b_coord, hot_flip)
+                if grid.rng.random() < 0.90:
+                    cur = 1 if int(grid.state.get(b_coord, 0)) != 0 else 0
+                    grid.p_bias[b_coord] = 0.9 if cur == 0 else 0.1
+            for g_coord in gate_col:
+                pressure[g_coord] = pressure.get(g_coord, 0.0) + 1.0
+                _set_hot(g_coord, gate_hot)
+        else:
+            for a_coord in input_a:
+                _set_cold(a_coord, min(cold_flip, 0.0001))
+                cur = 1 if int(grid.state.get(a_coord, 0)) != 0 else 0
+                grid.p_bias[a_coord] = 0.9999 if cur == 1 else 0.0001
+            b_coord = next((coord for coord in input_b if coord[0] == gx), None)
+            if b_coord is not None:
+                _set_cold(b_coord, min(cold_flip, 0.0001))
+                cur = 1 if int(grid.state.get(b_coord, 0)) != 0 else 0
+                grid.p_bias[b_coord] = 0.9999 if cur == 1 else 0.0001
+            for g_coord in gate_col:
+                _set_cold(g_coord, gate_cold)
+
+        carry_in = carry_out
+
+    # Extend carry chain to match 6-bit (or dynamic) target width.
+    while len(column_output_bits) < len(target_bits_le):
+        column_output_bits.append(carry_in & 1)
+        carry_in >>= 1
+
+    for bit_index in range(len(target_bits_le)):
+        out_bit = column_output_bits[bit_index] if bit_index < len(column_output_bits) else 0
+        bit_match = out_bit == target_bits_le[bit_index]
+        column_match_flags.append(bit_match)
+        if bit_index < len(gate_cols):
+            gx = list(reversed(gate_cols))[bit_index]
+            column_match_by_x[gx] = column_match_by_x.get(gx, True) and bit_match
+        if not bit_match:
+            for a_coord in input_a:
+                pressure[a_coord] = pressure.get(a_coord, 0.0) + 2.0
+                _set_hot(a_coord, hot_flip)
+            for b_coord in input_b:
+                pressure[b_coord] = pressure.get(b_coord, 0.0) + 2.0
+                _set_hot(b_coord, hot_flip)
+            for g_coord in all_gate_coords:
+                pressure[g_coord] = pressure.get(g_coord, 0.0) + 1.0
+                _set_hot(g_coord, gate_hot)
+
+    # Cross-talk: each gate directly pressures its row (A_i) and column (B_j).
+    for a_coord in input_a:
+        for b_coord in input_b:
+            gate_coord = (b_coord[0], a_coord[1])
+            if grid.logic_role.get(gate_coord) != "gate":
+                continue
+            a_state = 1 if int(grid.state.get(a_coord, 0)) != 0 else 0
+            b_state = 1 if int(grid.state.get(b_coord, 0)) != 0 else 0
+            expected_gate = a_state & b_state
+            gate_state = 1 if int(grid.state.get(gate_coord, 0)) != 0 else 0
+            if gate_state != expected_gate:
+                pressure[a_coord] = pressure.get(a_coord, 0.0) + 1.5
+                pressure[b_coord] = pressure.get(b_coord, 0.0) + 1.5
+                pressure[gate_coord] = pressure.get(gate_coord, 0.0) + 1.5
+                _set_hot(a_coord, hot_flip)
+                _set_hot(b_coord, hot_flip)
+                _set_hot(gate_coord, gate_hot)
+            else:
+                _set_cold(gate_coord, gate_cold)
+
+    all_match = bool(column_match_flags) and all(column_match_flags)
+    a_value = sum((1 << i) for i, coord in enumerate(input_a_bits) if int(grid.state.get(coord, 0)) != 0)
+    b_value = sum((1 << i) for i, coord in enumerate(input_b_bits) if int(grid.state.get(coord, 0)) != 0)
+    current_guess = a_value * b_value
+    total_error = abs(target_value - current_guess)
+    denom = max(1.0, float(target_value))
+    global_temp = max(0.0, min(1.0, total_error / denom))
+    solved_math = (a_value * b_value) == target_value
+    if total_error == 0:
+        grid.logic_success_streak += 1
+    else:
+        grid.logic_success_streak = 0
+
+    if grid.logic_success_streak >= max(1, int(grid.logic_success_streak_ticks)):
+        grid.logic_solved = True
+        grid.logic_pause_requested = True
+        grid.needs_final_render = True
+        grid.logic_solved_cells.clear()
+        for coord, role in grid.logic_role.items():
+            if role in {"input_a", "input_b", "gate", "target"}:
+                grid.logic_solved_cells.add((coord[0], coord[1]))
+            if role in {"input_a", "input_b"}:
+                bit = 1 if int(grid.state.get(coord, 0)) != 0 else 0
+                grid.p_bias[coord] = 1.0 if bit == 1 else 0.0
+                grid.set_mutation_type(coord, _p_bias_to_mutation_type(grid.p_bias[coord]))
+                grid.touch(coord)
+
+    jolt_active = False
+    if (
+        grid.logic_stagnation_ticks > max(1, int(grid.logic_jolt_threshold_ticks))
+        and not grid.logic_solved
+        and total_error > 0
+    ):
+        jolt_active = True
+        grid.logic_resume_requested = True
+        grid.logic_pause_requested = False
+        for coord, role in grid.logic_role.items():
+            if role != "target":
+                grid.p_bias[coord] = max(0.0, min(1.0, float(grid.logic_jolt_bias)))
+        grid.logic_jolt_notice_ticks = 18
+
+    # Keep target anchors clamped to binary 1111 and M7 visual coding.
+    for coord in target_set:
+        grid.p_bias[coord] = 1.0
+        grid.state[coord] = 1 if target_bits_by_coord.get(coord, 0) != 0 else 0
+        grid.set_mutation_type(coord, 7)
+        grid.touch(coord)
+
+    for coord in tuple(grid.state.keys()):
+        if coord not in grid.cells:
+            continue
+
+        role = grid.logic_role.get(coord, "gate")
+        if coord in target_set or role == "target":
+            continue
+
+        prev_bias = max(0.0, min(1.0, float(grid.p_bias.get(coord, 0.5))))
+        # Exponential pressure response for sharper search dynamics.
+        next_bias = 1.0 - ((1.0 - prev_bias) * math.exp(-max(0.0, pressure.get(coord, 0.0))))
+        next_bias = max(0.0, min(1.0, next_bias))
+        grid.p_bias[coord] = next_bias
+
+        flip_chance = max(0.0, min(0.95, flip_prob.get(coord, 0.0)))
+        flip_chance = max(flip_chance, global_temp * 0.9)
+        if total_error == 0:
+            flip_chance = 0.0
+        if jolt_active:
+            flip_chance = max(flip_chance, 0.8)
+        if grid.rng.random() < flip_chance:
+            current = 1 if int(grid.state.get(coord, 0)) != 0 else 0
+            grid.state[coord] = 0 if current == 1 else 1
+
+        grid.set_mutation_type(coord, _p_bias_to_mutation_type(next_bias))
+        grid.touch(coord)
+
+    if total_error == 0:
+        grid.logic_stagnation_ticks = 0
+        grid.logic_jolt_notice_ticks = 0
+    elif grid.state == prev_state:
+        grid.logic_stagnation_ticks += 1
+    else:
+        grid.logic_stagnation_ticks = 0
+
+    if grid.logic_jolt_notice_ticks > 0:
+        grid.logic_jolt_notice_ticks -= 1
+
+
+def step_life(grid: SparseGrid) -> None:
+    if grid.mode == SimMode.MYCELIUM:
+        _step_life_mycelium(grid)
+    else:
+        _step_life_logic_factorizer(grid)
 
