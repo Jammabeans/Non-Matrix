@@ -215,6 +215,25 @@ def _step_life_mycelium(grid: SparseGrid) -> None:
     candidates = grid.candidate_frontier()
     neighbor_counts = _neighbor_counter(grid, candidates)
     candidates |= set(neighbor_counts.keys())
+    prior_alive_count = len(grid.alive_coords)
+    cull_out_of_bounds_count = 0
+    isolation_death_marks = 0
+    energy_death_marks = 0
+    bootstrap_ticks = max(0, int(getattr(grid, "mycelium_bootstrap_ticks", 0)))
+    bootstrap_active = (
+        grid.tick < bootstrap_ticks
+        and bool(grid.seed_anchors)
+        and not bool(grid.outpost_anchors)
+    )
+    bootstrap_crowding_bonus = (
+        max(0, int(getattr(grid, "mycelium_bootstrap_crowding_bonus", 0))) if bootstrap_active else 0
+    )
+    bootstrap_energy_discount = (
+        max(0.0, min(0.95, float(getattr(grid, "mycelium_bootstrap_energy_discount", 0.0))))
+        if bootstrap_active
+        else 0.0
+    )
+    effective_crowding_threshold = grid.crowding_threshold + bootstrap_crowding_bonus
 
     next_alive: set[Coord] = set()
     birth_parent: dict[Coord, Coord | None] = {}
@@ -301,7 +320,7 @@ def _step_life_mycelium(grid: SparseGrid) -> None:
     for coord in tuple(next_alive):
         if grid.is_anchor_protected(coord):
             continue
-        if coord in grid.alive_coords and neighbor_counts.get(coord, 0) > grid.crowding_threshold:
+        if coord in grid.alive_coords and neighbor_counts.get(coord, 0) > effective_crowding_threshold:
             next_alive.discard(coord)
             overcrowding_deaths.add(coord)
 
@@ -314,10 +333,12 @@ def _step_life_mycelium(grid: SparseGrid) -> None:
     for coord in tuple(next_alive):
         if not grid.is_within_bounds(coord):
             next_alive.discard(coord)
+            cull_out_of_bounds_count += 1
 
     current_alive = set(grid.alive_coords)
     to_activate = next_alive - current_alive
     to_deactivate = current_alive - next_alive
+    rule_deactivate_count = len(to_deactivate)
 
     grid.tick += 1
     for coord in to_activate:
@@ -387,6 +408,7 @@ def _step_life_mycelium(grid: SparseGrid) -> None:
             grid.set_isolated_ticks(coord, iso)
             if iso > 10 and not grid.is_anchor_protected(coord):
                 grid.mark_for_death(coord)
+                isolation_death_marks += 1
                 continue
         else:
             grid.set_isolated_ticks(coord, 0)
@@ -442,15 +464,21 @@ def _step_life_mycelium(grid: SparseGrid) -> None:
             effective_tax = 0
         vine_multiplier = 1 if neighbors_count == grid.mycelium_target_neighbors else grid.vine_off_target_multiplier
         drain_cost = (effective_tax + mutation_cost) * vine_multiplier
-        if neighbors_count > grid.crowding_threshold:
+        if neighbors_count > effective_crowding_threshold:
             drain_cost *= grid.crowding_multiplier
+        if bootstrap_energy_discount > 0.0:
+            drain_cost = max(0, int(round(float(drain_cost) * (1.0 - bootstrap_energy_discount))))
         remaining = max(0, grid.energy(coord) - drain_cost)
         grid.set_energy(coord, remaining)
         if remaining <= 0:
             grid.mark_for_death(coord)
+            energy_death_marks += 1
 
     # Hard cap active population to protect framerate.
+    cull_before = len(grid.cells)
+    protected_before = sum(1 for coord in grid.cells if grid.is_anchor_protected(coord))
     grid.cull_to_max_active()
+    cull_removed = max(0, cull_before - len(grid.cells))
 
     # Lazy cleanup to avoid long blocking deletion stalls.
     grid.process_pending_deaths(limit=500)
@@ -479,6 +507,37 @@ def _step_life_mycelium(grid: SparseGrid) -> None:
         grid.cooldown_ticks = 1
     elif grid.cooldown_ticks > 0:
         grid.cooldown_ticks -= 1
+
+    if (
+        grid.debug_mycelium_diagnosis
+        and grid.debug_mycelium_log_every > 0
+        and (grid.tick % int(grid.debug_mycelium_log_every)) == 0
+    ):
+        anchor_survivors = sum(1 for coord in grid.alive_coords if grid.is_anchor_protected(coord))
+        print(
+            "[MYCELIUM_DIAG]"
+            f" tick={grid.tick}"
+            f" alive_before={prior_alive_count}"
+            f" alive_after={len(grid.alive_coords)}"
+            f" max_active={grid.max_active_cells}"
+            f" cull_removed={cull_removed}"
+            f" protected_before={protected_before}"
+            f" anchor_survivors={anchor_survivors}"
+            f" out_of_bounds_culled={cull_out_of_bounds_count}"
+            f" radius={grid.current_radius}"
+            f" anchors={len(grid.seed_anchors)}"
+            f" to_activate={len(to_activate)}"
+            f" to_deactivate={rule_deactivate_count}"
+            f" overcrowding_deaths={len(overcrowding_deaths)}"
+            f" isolation_marks={isolation_death_marks}"
+            f" energy_marks={energy_death_marks}"
+            f" pending_death={len(grid.pending_death)}"
+            f" cooldown={grid.cooldown_ticks}"
+            f" births_allowed={int(births_allowed)}"
+            f" bootstrap={int(bootstrap_active)}"
+            f" crowding_threshold={effective_crowding_threshold}"
+            f" energy_discount={bootstrap_energy_discount:.2f}"
+        )
 
     grid.maybe_spawn_food_clusters()
 

@@ -79,16 +79,19 @@ class SparseGrid:
         self.food_spawn_interval: int = 150
         self.food_cluster_min: int = 3
         self.food_cluster_max: int = 6
-        self.food_min_distance_ratio: float = 0.65
+        self.food_min_distance_ratio: float = 0.35
         self.food_energy_bonus: int = MAX_ENERGY * 4
         self.food_clusters: set[Coord] = set()
         self.outpost_anchors: set[Coord] = set()
         self.overcrowded_structural_cells: set[Coord] = set()
         self.structural_overcrowded_ticks: dict[Coord, int] = {}
-        self.food_capture_radius: int = 3
+        self.food_capture_radius: int = 5
         self.outpost_lock_radius: int = 2
         self.mycelium_target_neighbors: int = 2
         self.mycelium_zero_tax_enabled: bool = True
+        self.mycelium_bootstrap_ticks: int = 10
+        self.mycelium_bootstrap_crowding_bonus: int = 2
+        self.mycelium_bootstrap_energy_discount: float = 0.35
         self.vine_off_target_multiplier: int = 2
         self.crowding_threshold: int = 3
         self.crowding_multiplier: int = 4
@@ -127,6 +130,8 @@ class SparseGrid:
         self.target_number: int = 35
         self.render_every_x_ticks: int = 5
         self.needs_final_render: bool = False
+        self.debug_mycelium_diagnosis: bool = False
+        self.debug_mycelium_log_every: int = 20
 
         # Deterministic exploration fields.
         self.smell_field: dict[Coord, float] = {}

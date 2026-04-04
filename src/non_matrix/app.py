@@ -201,6 +201,26 @@ def _adjust_control_value(sim: Simulation, item: ControlItem, direction: int) ->
         setattr(sim.grid, attr, float(clamped))
 
 
+def _apply_direct_control_value(sim: Simulation, item: ControlItem, raw_text: str) -> bool:
+    """Apply direct text input to a numeric control item."""
+    _, attr, kind, _, min_value, max_value = item
+    text = raw_text.strip()
+    if kind not in {"int", "float"} or not text:
+        return False
+
+    try:
+        parsed = float(text)
+    except ValueError:
+        return False
+
+    clamped = max(float(min_value), min(float(max_value), parsed))
+    if kind == "int":
+        setattr(sim.grid, attr, int(round(clamped)))
+    else:
+        setattr(sim.grid, attr, float(clamped))
+    return True
+
+
 def _wrap_text(text: str, font: pygame.font.Font, max_width: int) -> list[str]:
     words = text.split()
     if not words:
@@ -305,6 +325,47 @@ def _cell_color(sim: Simulation, coord: tuple[int, int]) -> tuple[int, int, int]
     return MUTATION_COLORS.get(sim.grid.mutation_type(coord), CELL_COLOR)
 
 
+def _hovered_legend_label(
+    sim: Simulation,
+    coord: tuple[int, int],
+    alive_coords: set[tuple[int, int]],
+    structural_coords: set[tuple[int, int]],
+    food_coords: set[tuple[int, int]],
+    outpost_coords: set[tuple[int, int]],
+) -> str | None:
+    if coord in food_coords:
+        return "Food"
+    if coord in outpost_coords:
+        return "Outpost Anchor (star)"
+
+    if sim.grid.mode == SimMode.LOGIC_FACTORIZER:
+        role = sim.grid.logic_role.get(coord)
+        if role is None:
+            return None
+        if role == "target":
+            return "Target (Locked)"
+        if (
+            sim.grid.logic_solved
+            and coord in sim.grid.logic_solved_cells
+            and role in {"input_a", "input_b"}
+        ):
+            return "Resolved Inputs"
+        state = 1 if int(sim.grid.state.get(coord, 0)) != 0 else 0
+        return "Input / Gate ON" if state == 1 else "Input / Gate OFF"
+
+    if coord in structural_coords and coord not in alive_coords:
+        return "Structural Ghost"
+    if coord in sim.grid.overcrowded_structural_cells:
+        return "Calcified/Overcrowded"
+    if coord in alive_coords:
+        if sim.is_structural_at(coord):
+            return "Structural (White)" if ((coord[0] + coord[1]) & 1) == 0 else "Structural (Blue)"
+        if sim.is_old_growth_at(coord):
+            return "Old Growth"
+        return f"Mutation M{sim.grid.mutation_type(coord)}"
+    return None
+
+
 def _seed_template_coords(text: str) -> set[tuple[int, int]]:
     coords: set[tuple[int, int]] = set()
     for row_index, byte in enumerate(text.encode("utf-8")):
@@ -376,6 +437,8 @@ def _draw(
     panel_index: int,
     panel_scroll: int,
     sidebar_width: int,
+    editing_attr: str | None = None,
+    editing_text: str = "",
     render_stride: int = 1,
 ) -> None:
     root_screen = screen
@@ -385,6 +448,19 @@ def _draw(
     screen = root_screen.subsurface(world_rect)
     now_tick = snapshot_tick
     size = max(1, int(viewport.cell_size))
+    mouse_pos = pygame.mouse.get_pos()
+
+    hovered_legend_label: str | None = None
+    if world_rect.collidepoint(mouse_pos):
+        wx, wy = viewport.screen_to_world(mouse_pos[0] - sidebar_width, mouse_pos[1])
+        hovered_legend_label = _hovered_legend_label(
+            sim,
+            (wx, wy),
+            alive_coords=alive_coords,
+            structural_coords=structural_coords,
+            food_coords=food_coords,
+            outpost_coords=outpost_coords,
+        )
 
     # Faint spatial grid to improve orientation while panning/zooming.
     if size >= 4:
@@ -648,7 +724,12 @@ def _draw(
             age = now_tick - sim.grid.last_touched_tick(coord)
             
             intensity = 0
-            if sim.grid.mode != SimMode.LOGIC_FACTORIZER and sim.grid.energy(coord) >= heat_threshold:
+            # Keep structural lineage colors readable by excluding structural cells from heat tinting.
+            if (
+                sim.grid.mode != SimMode.LOGIC_FACTORIZER
+                and not sim.is_structural_at(coord)
+                and sim.grid.energy(coord) >= heat_threshold
+            ):
                 age = now_tick - sim.last_touched_at(coord)
                 intensity = max(0, min(180, 180 - (age * 8)))
             if intensity > 0:
@@ -714,14 +795,19 @@ def _draw(
     pygame.draw.rect(root_screen, PANEL_BG, panel_rect)
     pygame.draw.rect(root_screen, PANEL_BORDER, panel_rect, width=2)
 
-    title = panel_font.render("Settings  (Click +/- or use arrows)", True, PANEL_TEXT)
+    if editing_attr is None:
+        title_text = "Settings  (Click +/- or use arrows)"
+    else:
+        title_text = "Settings  (Editing value: Enter=apply, Esc=cancel)"
+    title = panel_font.render(title_text, True, PANEL_TEXT)
     root_screen.blit(title, (panel_rect.x + 10, panel_rect.y + 12))
 
     hovered_attr: str | None = None
-    mouse_pos = pygame.mouse.get_pos()
     for idx, row_rect, minus_rect, plus_rect in rows:
         label, attr, kind, *_ = visible_items[idx]
         value = _format_control_value(getattr(sim.grid, attr), kind)
+        if editing_attr == attr and kind in {"int", "float"}:
+            value = f"[{editing_text}]"
         color = PANEL_ACTIVE if idx == panel_index else PANEL_TEXT
         compact_label = label if len(label) <= 26 else f"{label[:25]}…"
         row = panel_font.render(f"{compact_label}: {value}", True, color)
@@ -737,7 +823,11 @@ def _draw(
         if row_rect.collidepoint(mouse_pos) or minus_rect.collidepoint(mouse_pos) or plus_rect.collidepoint(mouse_pos):
             hovered_attr = attr
 
-    hint = panel_font.render("Enter submits seed when text exists.", True, PANEL_TEXT)
+    if editing_attr is None:
+        hint_text = "Enter submits seed when text exists."
+    else:
+        hint_text = "Typing edits selected setting. Enter apply, Esc cancel."
+    hint = panel_font.render(hint_text, True, PANEL_TEXT)
     root_screen.blit(hint, (panel_rect.x + 10, panel_rect.bottom - 28))
 
     logic_reset_rect = pygame.Rect(panel_rect.x + 10, panel_rect.bottom - 54, panel_rect.width - 20, 20)
@@ -829,6 +919,10 @@ def _draw(
             ("Mutation M7", "swatch", MUTATION_COLORS[7]),
         ]
     for label, kind, color in legend_items:
+        row_rect = pygame.Rect(info_rect.x + 6, iy - 1, info_rect.width - 12, 16)
+        if hovered_legend_label == label:
+            pygame.draw.rect(root_screen, (58, 74, 102), row_rect)
+            pygame.draw.rect(root_screen, PANEL_ACTIVE, row_rect, width=1)
         swatch = pygame.Rect(info_rect.x + 10, iy + 2, 12, 12)
         if kind == "star":
             pygame.draw.rect(root_screen, PANEL_BORDER, swatch, width=1)
@@ -884,6 +978,8 @@ def main() -> None:
     accumulator = 0.0
     panel_index = 0
     panel_scroll = 0
+    editing_attr: str | None = None
+    editing_text = ""
 
     while running:
         dt = clock.tick(60) / 1000.0
@@ -905,6 +1001,9 @@ def main() -> None:
                 running = False
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1:
+                    if editing_attr is not None:
+                        editing_attr = None
+                        editing_text = ""
                     logic_reset_rect = pygame.Rect(10, viewport.height - 54, SIDEBAR_WIDTH - 20, 20)
                     if logic_reset_rect.collidepoint(event.pos) and sim.grid.mode == SimMode.LOGIC_FACTORIZER:
                         sim.grid._init_logic_lattice()
@@ -933,6 +1032,11 @@ def main() -> None:
                                 break
                             if row_rect.collidepoint(event.pos):
                                 panel_index = idx
+                                item = visible_items[panel_index]
+                                _, attr, kind, *_ = item
+                                if kind in {"int", "float"}:
+                                    editing_attr = attr
+                                    editing_text = _format_control_value(getattr(sim.grid, attr), kind)
                                 handled = True
                                 break
                         if handled:
@@ -979,7 +1083,22 @@ def main() -> None:
                 viewport.pan(dx, dy)
                 last_mouse = event.pos
             elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_RETURN and input_text:
+                if editing_attr is not None:
+                    visible_items = _visible_control_items(sim)
+                    edit_item = next((item for item in visible_items if item[1] == editing_attr), None)
+                    if event.key == pygame.K_ESCAPE:
+                        editing_attr = None
+                        editing_text = ""
+                    elif event.key == pygame.K_RETURN:
+                        if edit_item is not None:
+                            _apply_direct_control_value(sim, edit_item, editing_text)
+                        editing_attr = None
+                        editing_text = ""
+                    elif event.key == pygame.K_BACKSPACE:
+                        editing_text = editing_text[:-1]
+                    elif event.unicode and event.unicode in "0123456789.-":
+                        editing_text += event.unicode
+                elif event.key == pygame.K_RETURN and input_text:
                     sim.seed_text(input_text, origin=(0, 0))
                     input_text = ""
                     accumulator = 0.0
@@ -988,7 +1107,9 @@ def main() -> None:
                     sim.clear_world()
                     sim.config.auto_step = False
                     accumulator = 0.0
-                elif event.key in (pygame.K_UP, pygame.K_DOWN, pygame.K_LEFT, pygame.K_RIGHT, pygame.K_RETURN):
+                elif event.key in (pygame.K_UP, pygame.K_DOWN, pygame.K_LEFT, pygame.K_RIGHT) or (
+                    event.key == pygame.K_RETURN and not input_text
+                ):
                     visible_items = _visible_control_items(sim)
                     if panel_index >= len(visible_items):
                         panel_index = max(0, len(visible_items) - 1)
@@ -1052,6 +1173,8 @@ def main() -> None:
                 panel_index=panel_index,
                 panel_scroll=panel_scroll,
                 sidebar_width=SIDEBAR_WIDTH,
+                editing_attr=editing_attr,
+                editing_text=editing_text,
                 render_stride=render_stride,
             )
             pygame.display.flip()
